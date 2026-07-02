@@ -50,9 +50,10 @@ KEYWORD_AUTOREPLIES = {
     # Exact keyword trigger keeps this from firing during normal conversation.
     "813874968486490": {
         "CITIZEN": (
-            "Yes — grab the USCIS prep free item here: https://lyrashaai.com/ebook-store "
-            "The complete USCIS Exam Prep workbook is $39.99, and there is also a practice "
-            "testing workbook if you want extra help studying. 🇺🇸"
+            "Yes — grab the free Top 10 USCIS Civics Questions checklist here: "
+            "https://assets.macaly-user-data.dev/xbu7yb8xu3wwhsqfyoky12f0/aniivcj1awx5d0r6fmvhzwwy/xu6-1_iJ6bIFSUTzqSkuZ.pdf "
+            "If you want the full study system after that, the complete workbook is at "
+            "https://lyrashaai.com/ebook-store 🇺🇸"
         ),
     },
 }
