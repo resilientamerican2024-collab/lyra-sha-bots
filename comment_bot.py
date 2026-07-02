@@ -10,6 +10,7 @@ State is saved to comment_bot_state.json to avoid duplicate replies.
 
 import json
 import logging
+import re
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -43,6 +44,18 @@ SERVICE_INTEREST_TERMS = (
     "sign up", "signup", "hire", "get this", "how do i get", "for my business",
     "for my page", "reviews", "comments", "lyra", "lyra-sha", "lyrasha",
 )
+
+KEYWORD_AUTOREPLIES = {
+    # Trending Products — USCIS workbook/free-item funnel.
+    # Exact keyword trigger keeps this from firing during normal conversation.
+    "813874968486490": {
+        "CITIZEN": (
+            "Yes — grab the USCIS prep free item here: https://lyrashaai.com/ebook-store "
+            "The complete USCIS Exam Prep workbook is $39.99, and there is also a practice "
+            "testing workbook if you want extra help studying. 🇺🇸"
+        ),
+    },
+}
 
 _handlers = [logging.StreamHandler()]
 try:
@@ -236,6 +249,16 @@ def looks_like_service_interest(comment_text):
     return any(term in text for term in SERVICE_INTEREST_TERMS)
 
 
+def keyword_auto_reply(page_id, comment_text):
+    """Return a fixed reply for approved keyword automations, or None."""
+    page_rules = KEYWORD_AUTOREPLIES.get(str(page_id), {})
+    normalized = comment_text.strip()
+    for keyword, reply in page_rules.items():
+        if re.fullmatch(rf"#?\s*{re.escape(keyword)}\s*[!.?]?", normalized, re.IGNORECASE):
+            return reply
+    return None
+
+
 def generate_reply(claude, personality, page_name, comment_text):
     service_interest = looks_like_service_interest(comment_text)
     service_note = (
@@ -329,7 +352,11 @@ def main():
                     replied.add(comment_id)
                     continue
 
-                reply = generate_reply(claude, personality, page_name, comment_text)
+                reply = keyword_auto_reply(page_id, comment_text)
+                if reply:
+                    log.info(f"   🔑  Keyword automation matched for {commenter}: {comment_text[:50]}...")
+                else:
+                    reply = generate_reply(claude, personality, page_name, comment_text)
                 if not reply:
                     continue
 
