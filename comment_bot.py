@@ -56,6 +56,16 @@ KEYWORD_AUTOREPLIES = {
             "https://lyrashaai.com/ebook-store 🇺🇸"
         ),
     },
+    # Geriatric Teen Mom Oh No — FocusFlow workbook funnel.
+    # Public reply only; Messenger DM delivery is not active in this bot yet.
+    "565654433307015": {
+        "FLOW": (
+            "Here you go — the FocusFlow Family Bundle is on the LyraShaAI shop: "
+            "https://www.lyrashaai.com/ebook-store "
+            "It is a ready-to-use digital download for building calmer focus routines "
+            "without another subscription."
+        ),
+    },
 }
 
 _handlers = [logging.StreamHandler()]
