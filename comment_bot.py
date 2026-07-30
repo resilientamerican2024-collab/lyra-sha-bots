@@ -65,6 +65,12 @@ KEYWORD_AUTOREPLIES = {
             "It is a ready-to-use digital download for building calmer focus routines "
             "without another subscription."
         ),
+        "READY": (
+            "Here you go — the 30-Day Pantry Building Plan printable is on Etsy: "
+            "https://www.etsy.com/listing/4546524791/30-day-pantry-building-plan-printable "
+            "It is a simple digital download for building a working pantry one normal "
+            "grocery trip at a time."
+        ),
     },
 }
 
