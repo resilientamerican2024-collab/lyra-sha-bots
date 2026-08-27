@@ -11,6 +11,7 @@ Reads config from environment variables and runs:
 import json
 import logging
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -30,6 +31,19 @@ log = logging.getLogger(__name__)
 
 MOUNTAIN = pytz.timezone("America/Denver")
 HERE = Path(__file__).parent
+_FB_SENSITIVE_QUERY_RE = re.compile(
+    r"([?&](?:access_token|fb_exchange_token|client_secret)=)[^&\s]+",
+    re.IGNORECASE,
+)
+
+
+def _redact_facebook_secret(value, *secrets):
+    """Remove Facebook secrets and sensitive query values before logging."""
+    text = str(value)
+    for secret in secrets:
+        if secret:
+            text = text.replace(str(secret), "[REDACTED]")
+    return _FB_SENSITIVE_QUERY_RE.sub(r"\1[REDACTED]", text)
 
 
 def write_config():
@@ -153,7 +167,7 @@ def run_script(script_name, label):
         log.error(f"❌  {label} failed (exit {result.returncode})")
         if output:
             for line in output.splitlines()[-15:]:
-                log.error(f"   {line}")
+                log.error("   %s", _redact_facebook_secret(line))
         raise RuntimeError(f"{label} failed with exit code {result.returncode}")
 
     lowered = output.lower()
@@ -167,7 +181,7 @@ def run_script(script_name, label):
         log.info(f"✅  {label} completed")
     if output:
         for line in output.splitlines()[-10:]:
-            log.info(f"   {line}")
+            log.info("   %s", _redact_facebook_secret(line))
     return "skipped" if skipped else "partial" if partial else "completed"
 
 
@@ -224,6 +238,7 @@ def auto_refresh_fb_tokens():
             return
 
         import requests as _req
+        sensitive_values = [app_secret, user_token]
 
         # Check expiry and live validity of the first client token. Expiry dates
         # can look healthy even after Meta invalidates a token, so verify both.
@@ -243,13 +258,14 @@ def auto_refresh_fb_tokens():
                 try:
                     check = _req.get(
                         f"https://graph.facebook.com/v19.0/{first_page_id}",
-                        params={"access_token": first_token, "fields": "name"},
+                        params={"fields": "name"},
+                        headers={"Authorization": f"Bearer {first_token}"},
                         timeout=8,
                     )
                     token_valid = check.ok and "error" not in check.json()
                 except Exception as e:
                     token_valid = False
-                    log.warning(f"⚠️  FB token live check failed: {e}")
+                    log.warning("⚠️  FB token live check failed: %s", _redact_facebook_secret(e, first_token, *sensitive_values))
 
         if days_left > 14 and token_valid:
             log.info(f"✅  FB tokens healthy — {days_left} days until expiry and live check passed. No refresh needed.")
@@ -259,7 +275,7 @@ def auto_refresh_fb_tokens():
         log.info(f"🔄  FB tokens need refresh ({reason}) — auto-refreshing now...")
 
         # Exchange current token for new 60-day token
-        r = _req.get("https://graph.facebook.com/v19.0/oauth/access_token", params={
+        r = _req.post("https://graph.facebook.com/v19.0/oauth/access_token", data={
             "grant_type":        "fb_exchange_token",
             "client_id":         app_id,
             "client_secret":     app_secret,
@@ -267,21 +283,21 @@ def auto_refresh_fb_tokens():
         }, timeout=15)
 
         if not r.ok or "access_token" not in r.json():
-            log.error(f"❌  FB token exchange failed: {r.text[:200]}")
+            log.error("❌  FB token exchange failed: %s", _redact_facebook_secret(r.text[:200], *sensitive_values))
             log.error("    Session may be invalidated — manual re-auth required.")
             return
 
         new_user_token = r.json()["access_token"]
+        sensitive_values.append(new_user_token)
         cfg["facebook_user_token"] = new_user_token
 
         # Re-fetch all page tokens
         r2 = _req.get("https://graph.facebook.com/v19.0/me/accounts", params={
-            "access_token": new_user_token,
             "fields":       "id,name,access_token",
-        }, timeout=15)
+        }, headers={"Authorization": f"Bearer {new_user_token}"}, timeout=15)
 
         if not r2.ok:
-            log.error(f"❌  Failed to fetch page tokens: {r2.text[:200]}")
+            log.error("❌  Failed to fetch page tokens: %s", _redact_facebook_secret(r2.text[:200], *sensitive_values))
             return
 
         import datetime as _dt
@@ -303,7 +319,7 @@ def auto_refresh_fb_tokens():
         os.environ["BOT_CONFIG_JSON"] = json.dumps(cfg)
 
     except Exception as e:
-        log.error(f"❌  FB auto-refresh crashed: {e}")
+        log.error("❌  FB auto-refresh crashed: %s", _redact_facebook_secret(e, *locals().get("sensitive_values", [])))
 
 
 def main():

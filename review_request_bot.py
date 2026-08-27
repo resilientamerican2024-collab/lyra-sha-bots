@@ -17,6 +17,7 @@ Twilio handles SMS in/out.
 import json
 import logging
 import os
+import re
 import sqlite3
 from datetime import datetime
 from pathlib import Path
@@ -34,6 +35,14 @@ HERE          = Path(__file__).parent
 DATA_DIR      = Path(os.environ.get("RAILWAY_VOLUME_MOUNT_PATH", str(HERE)))
 DB_PATH       = DATA_DIR / "review_requests.db"
 CONFIG_FILE   = HERE / "review_bot_config.json"
+_FB_SENSITIVE_QUERY_RE = re.compile(r"([?&](?:access_token|fb_exchange_token|client_secret)=)[^&\s]+", re.IGNORECASE)
+
+
+def _redact_facebook_secret(value, secret=""):
+    text = str(value)
+    if secret:
+        text = text.replace(str(secret), "[REDACTED]")
+    return _FB_SENSITIVE_QUERY_RE.sub(r"\1[REDACTED]", text)
 
 TWILIO_ACCOUNT_SID = os.environ.get("TWILIO_ACCOUNT_SID", "")
 TWILIO_API_KEY     = os.environ.get("TWILIO_API_KEY", "")
@@ -283,12 +292,13 @@ def health():
             token   = clients[0].get("page_access_token", "")
             page_id = clients[0].get("page_id", "")
             r = _req.get(f"https://graph.facebook.com/v19.0/{page_id}",
-                params={"access_token": token, "fields": "name"}, timeout=8)
+                params={"fields": "name"},
+                headers={"Authorization": f"Bearer {token}"}, timeout=8)
             data = r.json()
             info["fb_token_valid"] = "error" not in data
             info["fb_page_name"]   = data.get("name", "unknown")
     except Exception as e:
-        info["fb_check_error"] = str(e)
+        info["fb_check_error"] = _redact_facebook_secret(e, token if "token" in locals() else "")
     return jsonify(info)
 
 

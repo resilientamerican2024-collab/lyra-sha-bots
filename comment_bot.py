@@ -24,6 +24,11 @@ STATE_FILE     = TOOLS_DIR / "comment_bot_state.json"
 LOG_FILE       = TOOLS_DIR / "comment_bot_log.txt"
 FB_BASE        = "https://graph.facebook.com/v19.0"
 LOOKBACK_HOURS = 48   # look back 48 hours on every run
+_ACCESS_TOKEN_QUERY_RE = re.compile(r"([?&]access_token=)[^&\s]+", re.IGNORECASE)
+
+
+class FacebookRequestError(RuntimeError):
+    """A Facebook request failed; its message is guaranteed not to contain the token."""
 
 SERVICE_REPLY_GUIDANCE = (
     "Shared Lyra-Sha AI service guidance for all page voices: "
@@ -212,6 +217,25 @@ PAGES = {
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
+def _redact_secret(value, secret):
+    """Remove a credential and token-shaped query value from text before logging."""
+    text = str(value)
+    if secret:
+        text = text.replace(str(secret), "[REDACTED]")
+    return _ACCESS_TOKEN_QUERY_RE.sub(r"\1[REDACTED]", text)
+
+
+def _facebook_request(method, url, page_token, **kwargs):
+    """Call Graph API without placing the page token in the request URL."""
+    headers = dict(kwargs.pop("headers", {}) or {})
+    headers["Authorization"] = f"Bearer {page_token}"
+    try:
+        return requests.request(method, url, headers=headers, **kwargs)
+    except Exception as exc:
+        safe_error = _redact_secret(exc, page_token)
+        log.warning("  Facebook %s request failed: %s", method, safe_error)
+        raise FacebookRequestError(safe_error) from None
+
 def load_state():
     if STATE_FILE.exists():
         with open(STATE_FILE) as f:
@@ -225,32 +249,34 @@ def save_state(state):
 
 
 def get_recent_posts(page_id, page_token, since_ts):
-    r = requests.get(
+    r = _facebook_request(
+        "GET",
         f"{FB_BASE}/{page_id}/posts",
+        page_token,
         params={
-            "access_token": page_token,
             "fields": "id,message,created_time",
             "since": int(since_ts.timestamp()),
             "limit": 25,
         },
     )
     if not r.ok:
-        log.warning(f"  Posts fetch failed for {page_id}: {r.text[:120]}")
+        log.warning("  Posts fetch failed for %s: %s", page_id, _redact_secret(r.text[:120], page_token))
         return []
     return r.json().get("data", [])
 
 
 def get_comments(post_id, page_token):
-    r = requests.get(
+    r = _facebook_request(
+        "GET",
         f"{FB_BASE}/{post_id}/comments",
+        page_token,
         params={
-            "access_token": page_token,
             "fields": "id,from,message,created_time,comments{from,id,message}",
             "limit": 50,
         },
     )
     if not r.ok:
-        log.warning(f"  Comments fetch failed for {post_id}: {r.text[:120]}")
+        log.warning("  Comments fetch failed for %s: %s", post_id, _redact_secret(r.text[:120], page_token))
         return []
     return r.json().get("data", [])
 
@@ -304,17 +330,18 @@ def generate_reply(claude, personality, page_name, comment_text):
         )
         return resp.content[0].text.strip()
     except Exception as e:
-        log.warning(f"  Claude error: {e}")
+        log.warning("  Claude error: %s", _redact_secret(e, ""))
         return None
 
 
 def post_reply(comment_id, page_token, message):
-    r = requests.post(
+    r = _facebook_request(
+        "POST",
         f"{FB_BASE}/{comment_id}/replies",
-        params={"access_token": page_token},
+        page_token,
         data={"message": message},
     )
-    return r.ok, r.text
+    return r.ok, _redact_secret(r.text, page_token)
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────

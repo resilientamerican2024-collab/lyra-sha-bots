@@ -7,6 +7,7 @@ Run on schedule: crontab -e → add: 0 * * * * /usr/bin/python3 /Users/cnp/Downl
 
 import json
 import logging
+import re
 import sys
 from pathlib import Path
 from datetime import datetime
@@ -30,6 +31,14 @@ ACCT_BASE   = "https://mybusinessaccountmanagement.googleapis.com/v1"
 INFO_BASE   = "https://mybusinessbusinessinformation.googleapis.com/v1"
 REVIEW_BASE = "https://mybusiness.googleapis.com/v4"
 FB_BASE     = "https://graph.facebook.com/v19.0"
+_FB_SENSITIVE_QUERY_RE = re.compile(r"([?&](?:access_token|fb_exchange_token|client_secret)=)[^&\s]+", re.IGNORECASE)
+
+
+def _redact_facebook_secret(value, secret):
+    text = str(value)
+    if secret:
+        text = text.replace(str(secret), "[REDACTED]")
+    return _FB_SENSITIVE_QUERY_RE.sub(r"\1[REDACTED]", text)
 
 _handlers = [logging.StreamHandler(sys.stdout)]
 try:
@@ -130,12 +139,13 @@ def get_unanswered_google_reviews(location_name, token):
 # ─────────────────────────────────────────────
 
 def fb_get(path, page_token, params=None):
-    p = {"access_token": page_token}
-    if params:
-        p.update(params)
-    r = requests.get(f"{FB_BASE}/{path}", params=p)
+    r = requests.get(
+        f"{FB_BASE}/{path}",
+        params=params,
+        headers={"Authorization": f"Bearer {page_token}"},
+    )
     if not r.ok:
-        print(f"❌ Facebook API Error {r.status_code}:", r.text)
+        print(f"❌ Facebook API Error {r.status_code}:", _redact_facebook_secret(r.text, page_token))
     r.raise_for_status()
     return r.json()
 
@@ -143,11 +153,11 @@ def fb_get(path, page_token, params=None):
 def fb_post(path, page_token, data):
     r = requests.post(
         f"{FB_BASE}/{path}",
-        params={"access_token": page_token},
+        headers={"Authorization": f"Bearer {page_token}"},
         json=data
     )
     if not r.ok:
-        print(f"❌ Facebook API Error {r.status_code}:", r.text)
+        print(f"❌ Facebook API Error {r.status_code}:", _redact_facebook_secret(r.text, page_token))
     r.raise_for_status()
     return r.json()
 
