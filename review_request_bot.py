@@ -327,7 +327,7 @@ def health():
         info["fb_check_error"] = _redact_facebook_secret(e, token if "token" in locals() else "")
         info["fb_auth_state"] = "AUTH_CHECK_FAILED"
         info["status"] = "degraded"
-    return jsonify(info)
+    return jsonify(info), (200 if info["status"] == "ok" else 503)
 
 
 @app.route("/", methods=["GET"])

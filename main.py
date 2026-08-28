@@ -9,6 +9,7 @@ Reads config from environment variables and runs:
 """
 
 import json
+import hashlib
 import logging
 import os
 import re
@@ -16,6 +17,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytz
@@ -44,6 +46,39 @@ def _redact_facebook_secret(value, *secrets):
         if secret:
             text = text.replace(str(secret), "[REDACTED]")
     return _FB_SENSITIVE_QUERY_RE.sub(r"\1[REDACTED]", text)
+
+
+def _write_fb_refresh_receipt(trigger, result, clients=None, valid_count=0,
+                              persistence="NOT_ATTEMPTED", reload_id=""):
+    """Write only non-secret maintenance evidence to the Railway volume."""
+    clients = clients or []
+    page_ids = sorted(str(client.get("page_id", "")) for client in clients)
+    expiries = sorted(str(client.get("token_expires", "")) for client in clients)
+    generation = hashlib.sha256(json.dumps(
+        {"page_ids": page_ids, "expiries": expiries},
+        sort_keys=True, separators=(",", ":")
+    ).encode()).hexdigest()[:16]
+    receipt = {
+        "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+        "trigger": trigger,
+        "credential_config_generation": generation,
+        "intended_page_count": len(clients),
+        "successful_page_count": valid_count,
+        "refresh_result": result,
+        "persistence_result": persistence,
+        "reload_identifier": reload_id,
+    }
+    receipt_dir = Path(os.environ.get("RAILWAY_VOLUME_MOUNT_PATH", str(HERE)))
+    receipt_path = receipt_dir / "facebook_refresh_receipt.json"
+    try:
+        receipt_dir.mkdir(parents=True, exist_ok=True)
+        temp_path = receipt_path.with_suffix(".tmp")
+        temp_path.write_text(json.dumps(receipt, indent=2) + "\n")
+        os.replace(temp_path, receipt_path)
+        log.info("Facebook maintenance receipt written: result=%s pages=%d/%d persistence=%s",
+                 result, valid_count, len(clients), persistence)
+    except Exception as exc:
+        log.error("Facebook maintenance receipt write failed: %s", exc)
 
 
 def write_config():
@@ -219,7 +254,7 @@ def run_review_request_server():
         log.error(f"Review Request Bot failed to start: {e}")
 
 
-def auto_refresh_fb_tokens():
+def auto_refresh_fb_tokens(trigger="startup"):
     """
     Silently extend Facebook tokens if they expire within 14 days or if
     Facebook rejects the stored Page token.
@@ -235,6 +270,7 @@ def auto_refresh_fb_tokens():
 
         if not all([app_id, app_secret, user_token]):
             log.warning("⚠️  FB auto-refresh: missing app credentials — skipping")
+            _write_fb_refresh_receipt(trigger, "SKIPPED_MISSING_CREDENTIALS", clients)
             return
 
         import requests as _req
@@ -272,6 +308,7 @@ def auto_refresh_fb_tokens():
 
         if days_left > 14 and token_valid:
             log.info(f"✅  FB tokens healthy — {days_left} days until expiry and live check passed. No refresh needed.")
+            _write_fb_refresh_receipt(trigger, "NO_REFRESH_HEALTHY", clients, valid_count)
             return
 
         reason = f"{len(clients) - valid_count} invalid live token(s)" if not token_valid else f"expiry in {days_left} days"
@@ -288,6 +325,7 @@ def auto_refresh_fb_tokens():
         if not r.ok or "access_token" not in r.json():
             log.error("❌  FB token exchange failed: %s", _redact_facebook_secret(r.text[:200], *sensitive_values))
             log.error("    Session may be invalidated — manual re-auth required.")
+            _write_fb_refresh_receipt(trigger, "AUTH_INVALID", clients, valid_count)
             return
 
         new_user_token = r.json()["access_token"]
@@ -301,6 +339,7 @@ def auto_refresh_fb_tokens():
 
         if not r2.ok:
             log.error("❌  Failed to fetch page tokens: %s", _redact_facebook_secret(r2.text[:200], *sensitive_values))
+            _write_fb_refresh_receipt(trigger, "REDERIVATION_FAILED", clients, valid_count)
             return
 
         import datetime as _dt
@@ -313,6 +352,7 @@ def auto_refresh_fb_tokens():
         if not expected_ids.issubset(token_map) or len(token_map) < len(expected_ids):
             log.error("❌  FB refresh returned an incomplete intended Page set (%d/%d); keeping current config.",
                       len(expected_ids & set(token_map)), len(expected_ids))
+            _write_fb_refresh_receipt(trigger, "INCOMPLETE_PAGE_SET", clients, valid_count)
             return
 
         # Merge new tokens back into existing client records (preserve page_name etc.)
@@ -327,15 +367,24 @@ def auto_refresh_fb_tokens():
 
         # Also update BOT_CONFIG_JSON env var in memory so future write_config() uses new tokens
         os.environ["BOT_CONFIG_JSON"] = json.dumps(cfg)
+        _write_fb_refresh_receipt(trigger, "REFRESHED_LOCAL_ONLY", cfg.get("facebook_clients", []),
+                                  len(expected_ids), "NOT_PERSISTED_TO_RAILWAY")
 
     except Exception as e:
         log.error("❌  FB auto-refresh crashed: %s", _redact_facebook_secret(e, *locals().get("sensitive_values", [])))
+        _write_fb_refresh_receipt(trigger, "CRASHED", locals().get("clients", []),
+                                  locals().get("valid_count", 0))
+
+
+def scheduled_fb_token_refresh():
+    """Single authoritative Railway scheduler entrypoint for the 08:05 job."""
+    auto_refresh_fb_tokens(trigger="scheduled_08:05")
 
 
 def main():
     log.info("=== Lyra-Sha AI Bot Runner starting ===")
     write_config()
-    auto_refresh_fb_tokens()
+    auto_refresh_fb_tokens(trigger="startup")
     init_leads_db()
 
     scheduler = BlockingScheduler(timezone=MOUNTAIN)
@@ -353,7 +402,7 @@ def main():
                       id="daily_leads", name="Daily Lead Sourcer")
 
     # FB token auto-refresh: daily at 8:05am — silently extends tokens before expiry
-    scheduler.add_job(auto_refresh_fb_tokens, CronTrigger(hour=8, minute=5, timezone=MOUNTAIN),
+    scheduler.add_job(scheduled_fb_token_refresh, CronTrigger(hour=8, minute=5, timezone=MOUNTAIN),
                       id="fb_token_refresh", name="FB Token Auto-Refresh")
 
     # Reddit bot: every 2 hours at :15
