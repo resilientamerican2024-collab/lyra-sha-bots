@@ -30,6 +30,10 @@ _ACCESS_TOKEN_QUERY_RE = re.compile(r"([?&]access_token=)[^&\s]+", re.IGNORECASE
 class FacebookRequestError(RuntimeError):
     """A Facebook request failed; its message is guaranteed not to contain the token."""
 
+
+class FacebookAuthError(FacebookRequestError):
+    """Facebook rejected authentication; callers must not report a green run."""
+
 SERVICE_REPLY_GUIDANCE = (
     "Shared Lyra-Sha AI service guidance for all page voices: "
     "If and only if the commenter clearly asks about the AI service, automation, "
@@ -236,6 +240,17 @@ def _facebook_request(method, url, page_token, **kwargs):
         log.warning("  Facebook %s request failed: %s", method, safe_error)
         raise FacebookRequestError(safe_error) from None
 
+
+def _raise_if_auth_invalid(response, page_id=""):
+    """Convert Meta auth failures into an explicit, non-secret failure state."""
+    try:
+        data = response.json()
+    except ValueError:
+        data = {}
+    error = data.get("error", {}) if isinstance(data, dict) else {}
+    if response.status_code in (401, 403) or error.get("code") in (190, 467):
+        raise FacebookAuthError(f"AUTH_INVALID for Facebook Page {page_id or 'unknown'}")
+
 def load_state():
     if STATE_FILE.exists():
         with open(STATE_FILE) as f:
@@ -260,6 +275,7 @@ def get_recent_posts(page_id, page_token, since_ts):
         },
     )
     if not r.ok:
+        _raise_if_auth_invalid(r, page_id)
         log.warning("  Posts fetch failed for %s: %s", page_id, _redact_secret(r.text[:120], page_token))
         return []
     return r.json().get("data", [])
@@ -276,6 +292,7 @@ def get_comments(post_id, page_token):
         },
     )
     if not r.ok:
+        _raise_if_auth_invalid(r)
         log.warning("  Comments fetch failed for %s: %s", post_id, _redact_secret(r.text[:120], page_token))
         return []
     return r.json().get("data", [])
@@ -426,4 +443,8 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except FacebookAuthError as exc:
+        log.error("%s", exc)
+        raise SystemExit(2)

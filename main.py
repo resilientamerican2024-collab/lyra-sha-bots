@@ -240,8 +240,8 @@ def auto_refresh_fb_tokens():
         import requests as _req
         sensitive_values = [app_secret, user_token]
 
-        # Check expiry and live validity of the first client token. Expiry dates
-        # can look healthy even after Meta invalidates a token, so verify both.
+        # Check expiry and live validity for every intended Page. Expiry dates
+        # can look healthy even after Meta invalidates tokens, so verify both.
         clients    = cfg.get("facebook_clients", [])
         exp_str    = clients[0].get("token_expires", "") if clients else ""
         days_left  = 999
@@ -250,28 +250,31 @@ def auto_refresh_fb_tokens():
             exp_date  = _dt.datetime.strptime(exp_str[:10], "%Y-%m-%d").date()
             days_left = (exp_date - _dt.date.today()).days
 
-        token_valid = True
+        valid_count = 0
         if clients:
-            first_page_id = str(clients[0].get("page_id", ""))
-            first_token   = clients[0].get("page_access_token", "")
-            if first_page_id and first_token:
-                try:
-                    check = _req.get(
-                        f"https://graph.facebook.com/v19.0/{first_page_id}",
-                        params={"fields": "name"},
-                        headers={"Authorization": f"Bearer {first_token}"},
-                        timeout=8,
-                    )
-                    token_valid = check.ok and "error" not in check.json()
-                except Exception as e:
-                    token_valid = False
-                    log.warning("⚠️  FB token live check failed: %s", _redact_facebook_secret(e, first_token, *sensitive_values))
+            for client in clients:
+                page_id = str(client.get("page_id", ""))
+                page_token = client.get("page_access_token", "")
+                if page_id and page_token:
+                    try:
+                        check = _req.get(
+                            f"https://graph.facebook.com/v19.0/{page_id}",
+                            params={"fields": "id,name"},
+                            headers={"Authorization": f"Bearer {page_token}"},
+                            timeout=8,
+                        )
+                        data = check.json() if check.content else {}
+                        if check.status_code == 200 and data.get("id") == page_id and "error" not in data:
+                            valid_count += 1
+                    except Exception as e:
+                        log.warning("⚠️  FB token live check failed: %s", _redact_facebook_secret(e, page_token, *sensitive_values))
+        token_valid = bool(clients) and valid_count == len(clients)
 
         if days_left > 14 and token_valid:
             log.info(f"✅  FB tokens healthy — {days_left} days until expiry and live check passed. No refresh needed.")
             return
 
-        reason = "invalid live token" if not token_valid else f"expiry in {days_left} days"
+        reason = f"{len(clients) - valid_count} invalid live token(s)" if not token_valid else f"expiry in {days_left} days"
         log.info(f"🔄  FB tokens need refresh ({reason}) — auto-refreshing now...")
 
         # Exchange current token for new 60-day token
@@ -304,8 +307,15 @@ def auto_refresh_fb_tokens():
         pages       = r2.json().get("data", [])
         expires_str = (_dt.date.today() + _dt.timedelta(days=60)).isoformat()
 
-        # Merge new tokens back into existing client records (preserve page_name etc.)
+        # Validate the complete intended Page set before replacing anything.
         token_map = {p["id"]: p["access_token"] for p in pages}
+        expected_ids = {str(client.get("page_id", "")) for client in clients}
+        if not expected_ids.issubset(token_map) or len(token_map) < len(expected_ids):
+            log.error("❌  FB refresh returned an incomplete intended Page set (%d/%d); keeping current config.",
+                      len(expected_ids & set(token_map)), len(expected_ids))
+            return
+
+        # Merge new tokens back into existing client records (preserve page_name etc.)
         for client in cfg.get("facebook_clients", []):
             pid = str(client.get("page_id", ""))
             if pid in token_map:

@@ -258,6 +258,10 @@ def health():
             "db_path": str(DB_PATH),
             "on_volume": str(DB_PATH).startswith("/data"),
             "fb_token_valid": None,
+            "fb_auth_state": "UNKNOWN",
+            "fb_pages_expected": 0,
+            "fb_pages_checked": 0,
+            "fb_pages_valid": 0,
             "fb_token_expires": None,
             "days_until_expiry": None,
             "config_age_hours": None}
@@ -283,22 +287,46 @@ def health():
         info["config_age_hours"] = round((_dt.datetime.utcnow().timestamp() - stat.st_mtime) / 3600, 1)
         cfg = json.loads(cfg_path.read_text())
         clients = cfg.get("facebook_clients", [])
+        info["fb_pages_expected"] = len(clients)
         if clients:
             exp = clients[0].get("token_expires", "")
             info["fb_token_expires"] = exp
             if exp:
                 exp_date = _dt.datetime.strptime(exp[:10], "%Y-%m-%d").date()
                 info["days_until_expiry"] = (_dt.date.today() - exp_date).days * -1
-            token   = clients[0].get("page_access_token", "")
-            page_id = clients[0].get("page_id", "")
-            r = _req.get(f"https://graph.facebook.com/v19.0/{page_id}",
-                params={"fields": "name"},
-                headers={"Authorization": f"Bearer {token}"}, timeout=8)
-            data = r.json()
-            info["fb_token_valid"] = "error" not in data
-            info["fb_page_name"]   = data.get("name", "unknown")
+            valid = 0
+            auth_failures = 0
+            first_name = "unknown"
+            for client in clients:
+                token = client.get("page_access_token", "")
+                page_id = str(client.get("page_id", ""))
+                r = _req.get(f"https://graph.facebook.com/v19.0/{page_id}",
+                    params={"fields": "id,name"},
+                    headers={"Authorization": f"Bearer {token}"}, timeout=8)
+                data = r.json() if r.content else {}
+                if r.status_code == 200 and data.get("id") == page_id and "error" not in data:
+                    valid += 1
+                    if valid == 1:
+                        first_name = data.get("name", "unknown")
+                else:
+                    error = data.get("error", {}) if isinstance(data, dict) else {}
+                    if error.get("code") in (190, 467) or r.status_code in (401, 403):
+                        auth_failures += 1
+            info["fb_pages_checked"] = len(clients)
+            info["fb_pages_valid"] = valid
+            info["fb_token_valid"] = valid == len(clients) and len(clients) > 0
+            info["fb_auth_state"] = "HEALTHY" if info["fb_token_valid"] else (
+                "AUTH_INVALID" if auth_failures else "AUTH_CHECK_FAILED")
+            info["fb_page_name"] = first_name
+            if not info["fb_token_valid"]:
+                info["status"] = "degraded"
+        else:
+            info["fb_auth_state"] = "AUTH_INVALID"
+            info["status"] = "degraded"
     except Exception as e:
         info["fb_check_error"] = _redact_facebook_secret(e, token if "token" in locals() else "")
+        info["fb_auth_state"] = "AUTH_CHECK_FAILED"
+        info["status"] = "degraded"
     return jsonify(info)
 
 
