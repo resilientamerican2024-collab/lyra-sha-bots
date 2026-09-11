@@ -28,6 +28,13 @@ class OfficeRuntime:
     This does not grant protected credentials or Founder authority. It only
     coordinates work at or below each Office's configured privilege tier and
     writes receipts to the append-only ledger.
+
+    Completion doctrine enforced here:
+      * No evidence = not done.
+      * If independent verification is required, no accepted verification =
+        not complete.
+      * A worker's assertion that work is finished never changes an assignment
+        directly to COMPLETED.
     """
 
     def __init__(self, ledger: RuntimeLedger):
@@ -127,6 +134,10 @@ class OfficeRuntime:
         assignment = self.assignments[assignment_id]
         if assignment.assigned_worker_id != worker_id:
             raise RuntimeViolation("only assigned worker may submit evidence")
+        if not evidence_type.strip():
+            raise RuntimeViolation("evidence type is required")
+        if not location.strip():
+            raise RuntimeViolation("evidence location is required")
         receipt = EvidenceReceipt(
             receipt_id=new_id("rcpt"),
             assignment_id=assignment_id,
@@ -183,6 +194,8 @@ class OfficeRuntime:
         assignment = self.assignments[assignment_id]
         if assignment.assigned_worker_id != worker_id:
             raise RuntimeViolation("only assigned worker may request verification")
+        if not assignment.evidence_receipt_ids:
+            raise RuntimeViolation("no evidence receipts: assignment cannot be verified")
         submitted_types = {
             self.receipts[receipt_id].evidence_type
             for receipt_id in assignment.evidence_receipt_ids
@@ -202,9 +215,26 @@ class OfficeRuntime:
         assignment = self.assignments[assignment_id]
         if assignment.verification_route != verifier_office:
             raise RuntimeViolation("wrong verification route")
+        if not assignment.evidence_receipt_ids:
+            raise RuntimeViolation("verification cannot accept an assignment with no evidence")
         transition(assignment, AssignmentState.VERIFIED)
         self.ledger.append("assignment", assignment)
-        self._event("verification_accepted", verifier_office, assignment_id=assignment_id)
+        self._event("verification_accepted", verifier_office, assignment_id=assignment_id,
+                    payload={"evidence_receipt_ids": list(assignment.evidence_receipt_ids)})
+        return assignment
+
+    def reject_verification(self, assignment_id: str, verifier_office: str,
+                            *, reason: str) -> Assignment:
+        assignment = self.assignments[assignment_id]
+        if assignment.verification_route != verifier_office:
+            raise RuntimeViolation("wrong verification route")
+        if not reason.strip():
+            raise RuntimeViolation("verification rejection requires a reason")
+        transition(assignment, AssignmentState.REJECTED, reason=reason)
+        self.ledger.append("assignment", assignment)
+        self._event("verification_rejected", verifier_office, assignment_id=assignment_id,
+                    payload={"reason": reason,
+                             "evidence_receipt_ids": list(assignment.evidence_receipt_ids)})
         return assignment
 
     def recover_stale_assignment(self, assignment_id: str, replacement_worker_id: str,
@@ -246,6 +276,8 @@ class OfficeRuntime:
             raise RuntimeViolation(
                 f"Founder gate blocks completion: {assignment.founder_gate.gate_type}"
             )
+        if not assignment.evidence_receipt_ids:
+            raise RuntimeViolation("no evidence = not done; completion requires evidence")
         if assignment.verification_route is not None and assignment.state != AssignmentState.VERIFIED:
             raise RuntimeViolation("verified evidence is required before completion")
         transition(assignment, AssignmentState.COMPLETED)
@@ -257,5 +289,6 @@ class OfficeRuntime:
         self.ledger.append("assignment", assignment)
         self._event("assignment_completed", assignment.receiving_office,
                     assignment_id=assignment_id, worker_id=assignment.assigned_worker_id,
-                    payload={"next_dependency": assignment.next_dependency})
+                    payload={"next_dependency": assignment.next_dependency,
+                             "evidence_receipt_ids": list(assignment.evidence_receipt_ids)})
         return assignment
