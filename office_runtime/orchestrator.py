@@ -7,12 +7,14 @@ from .models import (
     Assignment,
     AssignmentState,
     EvidenceReceipt,
+    Handoff,
     OfficeIdentity,
     RuntimeEvent,
     WorkerBinding,
     new_id,
     utc_now,
 )
+from .policies import assignment_needs_recovery
 from .state_machine import transition
 
 
@@ -34,6 +36,7 @@ class OfficeRuntime:
         self.workers: Dict[str, WorkerBinding] = {}
         self.assignments: Dict[str, Assignment] = {}
         self.receipts: Dict[str, EvidenceReceipt] = {}
+        self.handoffs: Dict[str, Handoff] = {}
 
     def _event(self, event_type: str, office_id: str, *, assignment_id: str | None = None,
                worker_id: str | None = None, payload: dict | None = None) -> RuntimeEvent:
@@ -143,6 +146,39 @@ class OfficeRuntime:
                     payload={"receipt_id": receipt.receipt_id, "evidence_type": evidence_type})
         return receipt
 
+    def create_handoff(self, assignment_id: str, *, from_office: str, to_office: str,
+                       purpose: str) -> Handoff:
+        assignment = self.assignments[assignment_id]
+        if from_office not in self.offices or to_office not in self.offices:
+            raise RuntimeViolation("handoff references unknown Office")
+        if from_office not in {assignment.originating_office, assignment.receiving_office,
+                               assignment.verification_route}:
+            raise RuntimeViolation("handoff sender is outside assignment route")
+        handoff = Handoff(
+            handoff_id=new_id("hnd"),
+            from_office=from_office,
+            to_office=to_office,
+            assignment_id=assignment_id,
+            purpose=purpose,
+            evidence_receipt_ids=list(assignment.evidence_receipt_ids),
+        )
+        self.handoffs[handoff.handoff_id] = handoff
+        self.ledger.append("handoff", handoff)
+        self._event("handoff_created", from_office, assignment_id=assignment_id,
+                    payload={"handoff_id": handoff.handoff_id, "to_office": to_office})
+        return handoff
+
+    def acknowledge_handoff(self, handoff_id: str, receiving_office: str) -> Handoff:
+        handoff = self.handoffs[handoff_id]
+        if handoff.to_office != receiving_office:
+            raise RuntimeViolation("only receiving Office may ACK handoff")
+        handoff.acknowledged_at = utc_now()
+        self.ledger.append("handoff", handoff)
+        self._event("handoff_acknowledged", receiving_office,
+                    assignment_id=handoff.assignment_id,
+                    payload={"handoff_id": handoff_id})
+        return handoff
+
     def ready_for_verification(self, assignment_id: str, worker_id: str) -> Assignment:
         assignment = self.assignments[assignment_id]
         if assignment.assigned_worker_id != worker_id:
@@ -169,6 +205,39 @@ class OfficeRuntime:
         transition(assignment, AssignmentState.VERIFIED)
         self.ledger.append("assignment", assignment)
         self._event("verification_accepted", verifier_office, assignment_id=assignment_id)
+        return assignment
+
+    def recover_stale_assignment(self, assignment_id: str, replacement_worker_id: str,
+                                 *, stale_after_seconds: int = 900) -> Assignment:
+        assignment = self.assignments[assignment_id]
+        if assignment.assigned_worker_id is None:
+            raise RuntimeViolation("assignment has no worker to recover")
+        stale_worker = self.workers[assignment.assigned_worker_id]
+        if not assignment_needs_recovery(
+            assignment, stale_worker, stale_after_seconds=stale_after_seconds
+        ):
+            raise RuntimeViolation("assignment is not stale")
+        replacement = self.workers[replacement_worker_id]
+        if replacement.office_id != assignment.receiving_office:
+            raise RuntimeViolation("replacement worker belongs to wrong Office")
+        if replacement.current_assignment_id not in (None, assignment_id):
+            raise RuntimeViolation("replacement worker is busy")
+
+        prior_worker_id = stale_worker.worker_id
+        stale_worker.current_assignment_id = None
+        stale_worker.status = "stale"
+        replacement.current_assignment_id = assignment_id
+        replacement.status = "working"
+        assignment.assigned_worker_id = replacement_worker_id
+        if assignment.state != AssignmentState.BLOCKED:
+            transition(assignment, AssignmentState.BLOCKED, reason="stale worker heartbeat")
+        transition(assignment, AssignmentState.DISPATCHED)
+        self.ledger.append("worker_binding", stale_worker)
+        self.ledger.append("worker_binding", replacement)
+        self.ledger.append("assignment", assignment)
+        self._event("stale_assignment_reassigned", assignment.receiving_office,
+                    assignment_id=assignment_id, worker_id=replacement_worker_id,
+                    payload={"prior_worker_id": prior_worker_id})
         return assignment
 
     def complete(self, assignment_id: str) -> Assignment:
