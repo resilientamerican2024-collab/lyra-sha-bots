@@ -60,7 +60,7 @@ class MinimumRuntimeProof(unittest.TestCase):
         self.runtime.acknowledge(assignment.assignment_id, "diana.worker.v0")
         self.runtime.start(assignment.assignment_id, "diana.worker.v0")
 
-    def test_lex_to_diana_to_vera_then_advance(self):
+    def test_lex_to_diana_to_vera_then_advance_and_restore(self):
         assignment = Assignment(
             assignment_id=new_id("asg"),
             originating_office="lex",
@@ -123,6 +123,18 @@ class MinimumRuntimeProof(unittest.TestCase):
         self.assertTrue(row["verification_handoff_acknowledged"])
         self.assertTrue(row["dependency_advanced"])
         self.assertIsNone(row["founder_gate"])
+
+        restored = OfficeRuntime.from_ledger(self.ledger)
+        restored_row = restored.operations_board()[0]
+        self.assertEqual(restored_row["state"], "completed")
+        self.assertEqual(restored_row["verification_state"], "accepted")
+        self.assertTrue(restored_row["verification_handoff_acknowledged"])
+        self.assertTrue(restored_row["dependency_advanced"])
+        self.assertIn("lex", restored.offices)
+        self.assertIn("diana", restored.offices)
+        self.assertIn("vera", restored.offices)
+        self.assertEqual(restored.workers["diana.worker.v0"].status, "available")
+        self.assertIsNone(restored.workers["diana.worker.v0"].current_assignment_id)
 
         event_types = [r["payload"]["event_type"] for r in self.ledger.records("event")]
         self.assertIn("assignment_acknowledged", event_types)
