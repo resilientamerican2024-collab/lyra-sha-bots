@@ -84,6 +84,16 @@ class MinimumRuntimeProof(unittest.TestCase):
             metadata={"next_dependency": assignment.next_dependency},
         )
         self.assertTrue(receipt.receipt_id)
+
+        handoff = self.runtime.create_handoff(
+            assignment.assignment_id,
+            from_office="diana",
+            to_office="vera",
+            purpose="independent verification",
+        )
+        self.runtime.acknowledge_handoff(handoff.handoff_id, "vera")
+        self.assertIsNotNone(handoff.acknowledged_at)
+
         self.runtime.ready_for_verification(assignment.assignment_id, "diana.worker.v0")
         self.runtime.accept_verification(assignment.assignment_id, "vera")
         completed = self.runtime.complete(assignment.assignment_id)
@@ -95,16 +105,45 @@ class MinimumRuntimeProof(unittest.TestCase):
 
         event_types = [r["payload"]["event_type"] for r in self.ledger.records("event")]
         self.assertIn("assignment_acknowledged", event_types)
+        self.assertIn("handoff_acknowledged", event_types)
         self.assertIn("verification_accepted", event_types)
         self.assertIn("assignment_completed", event_types)
 
-    def test_founder_gate_is_detected_not_bypassed(self):
-        gate = detect_founder_gate(
+    def test_founder_gate_blocks_dispatch(self):
+        assignment = Assignment(
+            assignment_id=new_id("asg"),
+            originating_office="lex",
+            receiving_office="diana",
+            mission="Attempt reserved spending action.",
+            requested_outcome="No dispatch without Founder authority.",
+            evidence_required=[],
+            verification_route="vera",
+        )
+        assignment.founder_gate = detect_founder_gate(
             requested_capabilities=["spending"],
             privilege_tier_required=PrivilegeTier.INTERNAL_EXECUTION,
         )
-        self.assertIsNotNone(gate)
-        self.assertEqual(gate.gate_type, "spending")
+        self.assertIsNotNone(assignment.founder_gate)
+        self.runtime.create_assignment(assignment)
+        with self.assertRaises(RuntimeViolation):
+            self.runtime.dispatch(assignment.assignment_id, "diana.worker.v0")
+
+    def test_verification_cannot_be_bypassed(self):
+        assignment = Assignment(
+            assignment_id=new_id("asg"),
+            originating_office="lex",
+            receiving_office="diana",
+            mission="Bounded internal operations work.",
+            requested_outcome="Operations artifact.",
+            evidence_required=[],
+            verification_route="vera",
+        )
+        self.runtime.create_assignment(assignment)
+        self.runtime.dispatch(assignment.assignment_id, "diana.worker.v0")
+        self.runtime.acknowledge(assignment.assignment_id, "diana.worker.v0")
+        self.runtime.start(assignment.assignment_id, "diana.worker.v0")
+        with self.assertRaises(RuntimeViolation):
+            self.runtime.complete(assignment.assignment_id)
 
     def test_wrong_office_worker_cannot_accept_dispatch(self):
         assignment = Assignment(
