@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Dict
+from typing import Dict, List
 
 from .ledger import RuntimeLedger
 from .models import (
@@ -292,3 +292,81 @@ class OfficeRuntime:
                     payload={"next_dependency": assignment.next_dependency,
                              "evidence_receipt_ids": list(assignment.evidence_receipt_ids)})
         return assignment
+
+    def advance_next_dependency(self, assignment_id: str, *, advancing_office: str) -> Assignment:
+        """Record that Operations actually advanced the verified next dependency.
+
+        Merely naming a next dependency in a completion receipt is not operational
+        follow-through. Advancement is a separate durable event and is allowed
+        only after the assignment is evidence-backed and COMPLETED.
+        """
+        assignment = self.assignments[assignment_id]
+        if assignment.state != AssignmentState.COMPLETED:
+            raise RuntimeViolation("next dependency may advance only after completion")
+        if assignment.founder_gate is not None:
+            raise RuntimeViolation(
+                f"Founder gate blocks dependency advancement: {assignment.founder_gate.gate_type}"
+            )
+        if not assignment.next_dependency:
+            raise RuntimeViolation("assignment has no next dependency to advance")
+        if advancing_office not in self.offices:
+            raise RuntimeViolation("unknown advancing Office")
+        if advancing_office != "diana":
+            raise RuntimeViolation("only Operations may advance the shared next dependency")
+        if assignment.dependency_advanced_at is not None:
+            raise RuntimeViolation("next dependency has already been advanced")
+
+        assignment.dependency_advanced_at = utc_now()
+        self.ledger.append("assignment", assignment)
+        self._event("next_dependency_advanced", advancing_office,
+                    assignment_id=assignment_id,
+                    payload={"next_dependency": assignment.next_dependency})
+        return assignment
+
+    def operations_board(self) -> List[dict]:
+        """Return Diana's machine-readable live operations board.
+
+        The board is derived from current runtime state rather than narrative
+        reporting. It distinguishes assignment, ACK, execution, evidence,
+        verification, completion, dependency advancement, and true Founder gates.
+        """
+        rows: List[dict] = []
+        for assignment in self.assignments.values():
+            worker = (
+                self.workers.get(assignment.assigned_worker_id)
+                if assignment.assigned_worker_id else None
+            )
+            handoffs = [
+                handoff for handoff in self.handoffs.values()
+                if handoff.assignment_id == assignment.assignment_id
+            ]
+            verification_handoff_ack = any(
+                handoff.to_office == assignment.verification_route
+                and handoff.acknowledged_at is not None
+                for handoff in handoffs
+            ) if assignment.verification_route else None
+
+            rows.append({
+                "assignment_id": assignment.assignment_id,
+                "originating_office": assignment.originating_office,
+                "receiving_office": assignment.receiving_office,
+                "state": assignment.state.value,
+                "worker_id": assignment.assigned_worker_id,
+                "worker_status": worker.status if worker else None,
+                "worker_last_heartbeat_at": worker.last_heartbeat_at if worker else None,
+                "acknowledged": assignment.acknowledged_at is not None,
+                "execution_started": assignment.execution_started_at is not None,
+                "evidence_count": len(assignment.evidence_receipt_ids),
+                "verification_route": assignment.verification_route,
+                "verification_state": assignment.verification_state.value,
+                "verification_handoff_acknowledged": verification_handoff_ack,
+                "founder_gate": (
+                    assignment.founder_gate.gate_type
+                    if assignment.founder_gate is not None else None
+                ),
+                "blocker_reason": assignment.blocker_reason,
+                "next_dependency": assignment.next_dependency,
+                "dependency_advanced": assignment.dependency_advanced_at is not None,
+                "completed_at": assignment.completed_at,
+            })
+        return rows
