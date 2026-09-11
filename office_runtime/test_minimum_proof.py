@@ -106,11 +106,73 @@ class MinimumRuntimeProof(unittest.TestCase):
         self.assertEqual(completed.next_dependency, "activate first bounded Office worker")
         self.assertIsNone(self.runtime.workers["diana.worker.v0"].current_assignment_id)
 
+        advanced = self.runtime.advance_next_dependency(
+            assignment.assignment_id,
+            advancing_office="diana",
+        )
+        self.assertIsNotNone(advanced.dependency_advanced_at)
+
+        board = self.runtime.operations_board()
+        self.assertEqual(len(board), 1)
+        row = board[0]
+        self.assertEqual(row["state"], "completed")
+        self.assertTrue(row["acknowledged"])
+        self.assertTrue(row["execution_started"])
+        self.assertEqual(row["evidence_count"], 1)
+        self.assertEqual(row["verification_state"], "accepted")
+        self.assertTrue(row["verification_handoff_acknowledged"])
+        self.assertTrue(row["dependency_advanced"])
+        self.assertIsNone(row["founder_gate"])
+
         event_types = [r["payload"]["event_type"] for r in self.ledger.records("event")]
         self.assertIn("assignment_acknowledged", event_types)
         self.assertIn("handoff_acknowledged", event_types)
         self.assertIn("verification_accepted", event_types)
         self.assertIn("assignment_completed", event_types)
+        self.assertIn("next_dependency_advanced", event_types)
+
+    def test_dependency_cannot_advance_before_completion(self):
+        assignment = Assignment(
+            assignment_id=new_id("asg"),
+            originating_office="lex",
+            receiving_office="diana",
+            mission="Prepare bounded operations work.",
+            requested_outcome="Verified operations artifact.",
+            evidence_required=["operations_artifact"],
+            verification_route="vera",
+            next_dependency="dispatch follow-on work",
+        )
+        self.runtime.create_assignment(assignment)
+        with self.assertRaisesRegex(RuntimeViolation, "only after completion"):
+            self.runtime.advance_next_dependency(
+                assignment.assignment_id,
+                advancing_office="diana",
+            )
+
+    def test_non_operations_office_cannot_advance_shared_dependency(self):
+        assignment = Assignment(
+            assignment_id=new_id("asg"),
+            originating_office="lex",
+            receiving_office="diana",
+            mission="Prepare bounded operations work.",
+            requested_outcome="Evidence-backed internal artifact.",
+            evidence_required=[],
+            verification_route=None,
+            next_dependency="dispatch follow-on work",
+        )
+        self._dispatch_and_start(assignment)
+        self.runtime.submit_evidence(
+            assignment.assignment_id,
+            "diana.worker.v0",
+            evidence_type="execution_receipt",
+            location="ledger://proof/dependency-advance",
+        )
+        self.runtime.complete(assignment.assignment_id)
+        with self.assertRaisesRegex(RuntimeViolation, "only Operations"):
+            self.runtime.advance_next_dependency(
+                assignment.assignment_id,
+                advancing_office="lex",
+            )
 
     def test_founder_gate_blocks_dispatch(self):
         assignment = Assignment(
@@ -128,6 +190,8 @@ class MinimumRuntimeProof(unittest.TestCase):
         )
         self.assertIsNotNone(assignment.founder_gate)
         self.runtime.create_assignment(assignment)
+        board = self.runtime.operations_board()
+        self.assertEqual(board[0]["founder_gate"], assignment.founder_gate.gate_type)
         with self.assertRaises(RuntimeViolation):
             self.runtime.dispatch(assignment.assignment_id, "diana.worker.v0")
 
