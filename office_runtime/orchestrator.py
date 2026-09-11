@@ -7,9 +7,12 @@ from .models import (
     Assignment,
     AssignmentState,
     EvidenceReceipt,
+    FounderGate,
     Handoff,
     OfficeIdentity,
+    PrivilegeTier,
     RuntimeEvent,
+    VerificationState,
     WorkerBinding,
     new_id,
     utc_now,
@@ -44,6 +47,117 @@ class OfficeRuntime:
         self.assignments: Dict[str, Assignment] = {}
         self.receipts: Dict[str, EvidenceReceipt] = {}
         self.handoffs: Dict[str, Handoff] = {}
+
+    @classmethod
+    def from_ledger(cls, ledger: RuntimeLedger) -> "OfficeRuntime":
+        runtime = cls(ledger)
+        runtime.restore_from_ledger()
+        return runtime
+
+    def restore_from_ledger(self) -> None:
+        """Rebuild current runtime state from append-only ledger snapshots.
+
+        The ledger is the durable source for v0. Replaying it must not create
+        new records or silently advance work; it only reconstructs the latest
+        known state of Offices, workers, assignments, evidence and handoffs.
+        """
+        self.offices.clear()
+        self.workers.clear()
+        self.assignments.clear()
+        self.receipts.clear()
+        self.handoffs.clear()
+
+        for record in self.ledger.records():
+            record_type = record.get("record_type")
+            payload = record.get("payload", {})
+
+            if record_type == "office":
+                office = OfficeIdentity(
+                    office_id=payload["office_id"],
+                    office_name=payload["office_name"],
+                    council_member=payload["council_member"],
+                    mission=payload["mission"],
+                    privilege_tier=PrivilegeTier(payload["privilege_tier"]),
+                    allowed_capabilities=list(payload.get("allowed_capabilities", [])),
+                    prohibited_capabilities=list(payload.get("prohibited_capabilities", [])),
+                    verifier_office=payload.get("verifier_office"),
+                )
+                self.offices[office.office_id] = office
+
+            elif record_type in {"worker_binding", "heartbeat"}:
+                worker = WorkerBinding(
+                    worker_id=payload["worker_id"],
+                    office_id=payload["office_id"],
+                    runtime=payload["runtime"],
+                    status=payload.get("status", "unknown"),
+                    last_heartbeat_at=payload.get("last_heartbeat_at"),
+                    current_assignment_id=payload.get("current_assignment_id"),
+                )
+                self.workers[worker.worker_id] = worker
+
+            elif record_type == "assignment":
+                founder_gate_payload = payload.get("founder_gate")
+                founder_gate = (
+                    FounderGate(**founder_gate_payload)
+                    if founder_gate_payload else None
+                )
+                assignment = Assignment(
+                    assignment_id=payload["assignment_id"],
+                    originating_office=payload["originating_office"],
+                    receiving_office=payload["receiving_office"],
+                    mission=payload["mission"],
+                    requested_outcome=payload["requested_outcome"],
+                    evidence_required=list(payload.get("evidence_required", [])),
+                    verification_route=payload.get("verification_route"),
+                    dependencies=list(payload.get("dependencies", [])),
+                    privilege_tier_required=PrivilegeTier(
+                        payload.get("privilege_tier_required", PrivilegeTier.INTERNAL_WORK.value)
+                    ),
+                    state=AssignmentState(payload.get("state", AssignmentState.CREATED.value)),
+                    created_at=payload.get("created_at", utc_now()),
+                    dispatched_at=payload.get("dispatched_at"),
+                    acknowledged_at=payload.get("acknowledged_at"),
+                    execution_started_at=payload.get("execution_started_at"),
+                    blocked_at=payload.get("blocked_at"),
+                    ready_for_verification_at=payload.get("ready_for_verification_at"),
+                    completed_at=payload.get("completed_at"),
+                    assigned_worker_id=payload.get("assigned_worker_id"),
+                    blocker_reason=payload.get("blocker_reason"),
+                    founder_gate=founder_gate,
+                    verification_state=VerificationState(
+                        payload.get("verification_state", VerificationState.PENDING.value)
+                    ),
+                    evidence_receipt_ids=list(payload.get("evidence_receipt_ids", [])),
+                    next_dependency=payload.get("next_dependency"),
+                    dependency_advanced_at=payload.get("dependency_advanced_at"),
+                )
+                self.assignments[assignment.assignment_id] = assignment
+
+            elif record_type == "evidence":
+                receipt = EvidenceReceipt(
+                    receipt_id=payload["receipt_id"],
+                    assignment_id=payload["assignment_id"],
+                    producer_worker_id=payload["producer_worker_id"],
+                    created_at=payload["created_at"],
+                    evidence_type=payload["evidence_type"],
+                    location=payload["location"],
+                    digest=payload.get("digest"),
+                    metadata=dict(payload.get("metadata", {})),
+                )
+                self.receipts[receipt.receipt_id] = receipt
+
+            elif record_type == "handoff":
+                handoff = Handoff(
+                    handoff_id=payload["handoff_id"],
+                    from_office=payload["from_office"],
+                    to_office=payload["to_office"],
+                    assignment_id=payload["assignment_id"],
+                    purpose=payload["purpose"],
+                    evidence_receipt_ids=list(payload.get("evidence_receipt_ids", [])),
+                    created_at=payload.get("created_at", utc_now()),
+                    acknowledged_at=payload.get("acknowledged_at"),
+                )
+                self.handoffs[handoff.handoff_id] = handoff
 
     def _event(self, event_type: str, office_id: str, *, assignment_id: str | None = None,
                worker_id: str | None = None, payload: dict | None = None) -> RuntimeEvent:
@@ -104,6 +218,7 @@ class OfficeRuntime:
         transition(assignment, AssignmentState.DISPATCHED)
         worker.current_assignment_id = assignment_id
         worker.status = "working"
+        self.ledger.append("worker_binding", worker)
         self.ledger.append("assignment", assignment)
         self._event("assignment_dispatched", assignment.receiving_office,
                     assignment_id=assignment_id, worker_id=worker_id)
@@ -294,12 +409,7 @@ class OfficeRuntime:
         return assignment
 
     def advance_next_dependency(self, assignment_id: str, *, advancing_office: str) -> Assignment:
-        """Record that Operations actually advanced the verified next dependency.
-
-        Merely naming a next dependency in a completion receipt is not operational
-        follow-through. Advancement is a separate durable event and is allowed
-        only after the assignment is evidence-backed and COMPLETED.
-        """
+        """Record that Operations actually advanced the verified next dependency."""
         assignment = self.assignments[assignment_id]
         if assignment.state != AssignmentState.COMPLETED:
             raise RuntimeViolation("next dependency may advance only after completion")
@@ -324,12 +434,7 @@ class OfficeRuntime:
         return assignment
 
     def operations_board(self) -> List[dict]:
-        """Return Diana's machine-readable live operations board.
-
-        The board is derived from current runtime state rather than narrative
-        reporting. It distinguishes assignment, ACK, execution, evidence,
-        verification, completion, dependency advancement, and true Founder gates.
-        """
+        """Return Diana's machine-readable live operations board."""
         rows: List[dict] = []
         for assignment in self.assignments.values():
             worker = (
