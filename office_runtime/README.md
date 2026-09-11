@@ -10,6 +10,14 @@ OFFICE != MODEL != RUNTIME != MACHINE.
 
 An Office remains the accountable organizational unit even when the underlying AI/runtime changes.
 
+## Completion doctrine
+- No evidence = not done.
+- EXECUTED is not VERIFIED.
+- If independent verification is required, no accepted verification = not complete.
+- A worker assertion cannot directly convert work to COMPLETED.
+- Vera rejection routes work back to correction/execution and re-verification.
+- Naming a next dependency is not the same as advancing it; dependency advancement is a separate durable event.
+
 ## Progressive privilege
 - Tier 0 — Constitutional identity: Office, charter, mission, responsibilities, prohibitions.
 - Tier 1 — Internal reasoning/work: receive assignments, research, analyze, draft, communicate internally, produce artifacts/recommendations.
@@ -41,12 +49,33 @@ Every Office must have:
 18. audit ledger
 
 ## Required assignment lifecycle
-ASSIGNED -> ACKNOWLEDGED -> EXECUTING -> EVIDENCE_READY -> VERIFYING -> VERIFIED|REJECTED -> NEXT_DEPENDENCY
+ASSIGNED -> ACKNOWLEDGED -> EXECUTING -> EVIDENCE_READY -> VERIFYING -> VERIFIED|REJECTED -> COMPLETED -> NEXT_DEPENDENCY_ADVANCED
 
 If no ACK: dispatch failed.
 If ACK but no execution evidence inside SLA: stale-work recovery begins.
 If rejected: diagnose/correct/retest within authority.
 If Founder action is NONE and an authorized next step exists: execute the next step.
+
+## Diana live operations board
+The harness exposes a machine-readable operations board derived from runtime state rather than narrative status reporting. For each assignment Diana can inspect:
+- accountable originating and receiving Offices
+- bound worker and current worker status
+- worker heartbeat
+- ACK state
+- execution-start state
+- evidence count
+- Vera/verification route and state
+- verification handoff ACK
+- true Founder gate, if any
+- blocker reason
+- next dependency
+- whether that dependency was actually advanced
+- completion timestamp
+
+This distinction is deliberate: ASSIGNED, WORKING, VERIFIED, COMPLETED and ADVANCED are different states.
+
+## Restart durability
+The filesystem JSONL ledger is append-only and the runtime can rebuild current Office, worker, assignment, evidence, handoff and dependency-advancement state from that ledger after a process restart. Replay reconstructs state only; it does not silently execute or advance work.
 
 ## Inter-Office assignment envelope
 - assignment_id
@@ -80,6 +109,8 @@ B. Interactive ChatGPT is closed. Office queues/workers continue.
 C. Underlying model/runtime changes. Office identity, charter, queue, evidence, and obligations persist.
 D. Diana detects unfinished authorized work with Founder action NONE. The next system event is dispatch/execution, not merely an email to Ingrid.
 E. Dispatch to an Office without a reachable worker is recorded as failed, never as WORKING.
+F. Process restarts do not erase ACK, evidence, verification, completion or dependency-advancement state.
+G. No assignment can be marked complete merely because a worker says it is done.
 
 ## Source findings informing v0
 - The older Rooted Ready Life Agent OS is phase/approval driven and explicitly requires Ingrid approval at every phase, so it is not the unattended pattern to replicate.
