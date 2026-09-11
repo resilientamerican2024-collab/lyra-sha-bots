@@ -54,6 +54,12 @@ class MinimumRuntimeProof(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
+    def _dispatch_and_start(self, assignment: Assignment) -> None:
+        self.runtime.create_assignment(assignment)
+        self.runtime.dispatch(assignment.assignment_id, "diana.worker.v0")
+        self.runtime.acknowledge(assignment.assignment_id, "diana.worker.v0")
+        self.runtime.start(assignment.assignment_id, "diana.worker.v0")
+
     def test_lex_to_diana_to_vera_then_advance(self):
         assignment = Assignment(
             assignment_id=new_id("asg"),
@@ -72,10 +78,7 @@ class MinimumRuntimeProof(unittest.TestCase):
         )
         self.assertIsNone(assignment.founder_gate)
 
-        self.runtime.create_assignment(assignment)
-        self.runtime.dispatch(assignment.assignment_id, "diana.worker.v0")
-        self.runtime.acknowledge(assignment.assignment_id, "diana.worker.v0")
-        self.runtime.start(assignment.assignment_id, "diana.worker.v0")
+        self._dispatch_and_start(assignment)
         receipt = self.runtime.submit_evidence(
             assignment.assignment_id,
             "diana.worker.v0",
@@ -128,7 +131,30 @@ class MinimumRuntimeProof(unittest.TestCase):
         with self.assertRaises(RuntimeViolation):
             self.runtime.dispatch(assignment.assignment_id, "diana.worker.v0")
 
-    def test_verification_cannot_be_bypassed(self):
+    def test_no_evidence_means_not_done_even_without_verification_route(self):
+        assignment = Assignment(
+            assignment_id=new_id("asg"),
+            originating_office="lex",
+            receiving_office="diana",
+            mission="Bounded internal task that does not require independent Vera review.",
+            requested_outcome="Internal completion with a durable receipt.",
+            evidence_required=[],
+            verification_route=None,
+        )
+        self._dispatch_and_start(assignment)
+        with self.assertRaisesRegex(RuntimeViolation, "no evidence = not done"):
+            self.runtime.complete(assignment.assignment_id)
+
+        self.runtime.submit_evidence(
+            assignment.assignment_id,
+            "diana.worker.v0",
+            evidence_type="execution_receipt",
+            location="ledger://proof/internal-execution-receipt",
+        )
+        completed = self.runtime.complete(assignment.assignment_id)
+        self.assertEqual(completed.state.value, "completed")
+
+    def test_verification_cannot_be_requested_without_evidence(self):
         assignment = Assignment(
             assignment_id=new_id("asg"),
             originating_office="lex",
@@ -138,12 +164,70 @@ class MinimumRuntimeProof(unittest.TestCase):
             evidence_required=[],
             verification_route="vera",
         )
-        self.runtime.create_assignment(assignment)
-        self.runtime.dispatch(assignment.assignment_id, "diana.worker.v0")
-        self.runtime.acknowledge(assignment.assignment_id, "diana.worker.v0")
-        self.runtime.start(assignment.assignment_id, "diana.worker.v0")
+        self._dispatch_and_start(assignment)
+        with self.assertRaisesRegex(RuntimeViolation, "no evidence receipts"):
+            self.runtime.ready_for_verification(assignment.assignment_id, "diana.worker.v0")
+
+    def test_verification_cannot_be_bypassed(self):
+        assignment = Assignment(
+            assignment_id=new_id("asg"),
+            originating_office="lex",
+            receiving_office="diana",
+            mission="Bounded internal operations work.",
+            requested_outcome="Operations artifact.",
+            evidence_required=["operations_artifact"],
+            verification_route="vera",
+        )
+        self._dispatch_and_start(assignment)
+        self.runtime.submit_evidence(
+            assignment.assignment_id,
+            "diana.worker.v0",
+            evidence_type="operations_artifact",
+            location="ledger://proof/unverified-artifact",
+        )
+        self.runtime.ready_for_verification(assignment.assignment_id, "diana.worker.v0")
         with self.assertRaises(RuntimeViolation):
             self.runtime.complete(assignment.assignment_id)
+
+    def test_vera_rejection_routes_back_to_execution_not_completion(self):
+        assignment = Assignment(
+            assignment_id=new_id("asg"),
+            originating_office="lex",
+            receiving_office="diana",
+            mission="Produce an operations artifact and correct it if Vera rejects it.",
+            requested_outcome="Verified operations artifact.",
+            evidence_required=["operations_artifact"],
+            verification_route="vera",
+        )
+        self._dispatch_and_start(assignment)
+        self.runtime.submit_evidence(
+            assignment.assignment_id,
+            "diana.worker.v0",
+            evidence_type="operations_artifact",
+            location="ledger://proof/rejected-artifact-v1",
+        )
+        self.runtime.ready_for_verification(assignment.assignment_id, "diana.worker.v0")
+        rejected = self.runtime.reject_verification(
+            assignment.assignment_id,
+            "vera",
+            reason="artifact does not satisfy requested outcome",
+        )
+        self.assertEqual(rejected.state.value, "rejected")
+        self.assertEqual(rejected.verification_state.value, "rejected")
+        with self.assertRaises(Exception):
+            self.runtime.complete(assignment.assignment_id)
+
+        self.runtime.start(assignment.assignment_id, "diana.worker.v0")
+        self.runtime.submit_evidence(
+            assignment.assignment_id,
+            "diana.worker.v0",
+            evidence_type="operations_artifact",
+            location="ledger://proof/corrected-artifact-v2",
+        )
+        self.runtime.ready_for_verification(assignment.assignment_id, "diana.worker.v0")
+        self.runtime.accept_verification(assignment.assignment_id, "vera")
+        completed = self.runtime.complete(assignment.assignment_id)
+        self.assertEqual(completed.state.value, "completed")
 
     def test_wrong_office_worker_cannot_accept_dispatch(self):
         assignment = Assignment(
