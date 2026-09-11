@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from dataclasses import asdict
 from typing import Dict
 
 from .ledger import RuntimeLedger
@@ -81,6 +80,10 @@ class OfficeRuntime:
         assignment = self.assignments[assignment_id]
         worker = self.workers[worker_id]
         office = self.offices[assignment.receiving_office]
+        if assignment.founder_gate is not None:
+            raise RuntimeViolation(
+                f"Founder gate blocks dispatch: {assignment.founder_gate.gate_type}"
+            )
         if worker.office_id != assignment.receiving_office:
             raise RuntimeViolation("worker is not bound to receiving Office")
         if assignment.privilege_tier_required > office.privilege_tier:
@@ -144,8 +147,14 @@ class OfficeRuntime:
         assignment = self.assignments[assignment_id]
         if assignment.assigned_worker_id != worker_id:
             raise RuntimeViolation("only assigned worker may request verification")
-        if assignment.evidence_required and not assignment.evidence_receipt_ids:
-            raise RuntimeViolation("required evidence has not been submitted")
+        submitted_types = {
+            self.receipts[receipt_id].evidence_type
+            for receipt_id in assignment.evidence_receipt_ids
+            if receipt_id in self.receipts
+        }
+        missing = sorted(set(assignment.evidence_required) - submitted_types)
+        if missing:
+            raise RuntimeViolation(f"required evidence missing: {', '.join(missing)}")
         transition(assignment, AssignmentState.READY_FOR_VERIFICATION)
         self.ledger.append("assignment", assignment)
         self._event("verification_requested", assignment.receiving_office,
@@ -164,6 +173,12 @@ class OfficeRuntime:
 
     def complete(self, assignment_id: str) -> Assignment:
         assignment = self.assignments[assignment_id]
+        if assignment.founder_gate is not None:
+            raise RuntimeViolation(
+                f"Founder gate blocks completion: {assignment.founder_gate.gate_type}"
+            )
+        if assignment.verification_route is not None and assignment.state != AssignmentState.VERIFIED:
+            raise RuntimeViolation("verified evidence is required before completion")
         transition(assignment, AssignmentState.COMPLETED)
         if assignment.assigned_worker_id:
             worker = self.workers[assignment.assigned_worker_id]
