@@ -109,6 +109,7 @@ class Assignment:
     verification_state: VerificationState = VerificationState.PENDING
     evidence_receipt_ids: List[str] = field(default_factory=list)
     next_dependency: Optional[str] = None
+    dependency_advanced_at: Optional[str] = None
 
 
 @dataclass
