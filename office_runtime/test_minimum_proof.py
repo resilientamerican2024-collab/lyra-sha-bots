@@ -1,0 +1,125 @@
+from __future__ import annotations
+
+import tempfile
+import unittest
+from pathlib import Path
+
+from office_runtime.ledger import RuntimeLedger
+from office_runtime.models import Assignment, OfficeIdentity, PrivilegeTier, WorkerBinding, new_id
+from office_runtime.orchestrator import OfficeRuntime, RuntimeViolation
+from office_runtime.policies import detect_founder_gate
+
+
+class MinimumRuntimeProof(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.ledger = RuntimeLedger(Path(self.temp.name) / "runtime.jsonl")
+        self.runtime = OfficeRuntime(self.ledger)
+
+        self.runtime.register_office(OfficeIdentity(
+            office_id="lex",
+            office_name="Vision & Strategy",
+            council_member="Lex",
+            mission="Set portfolio direction and priorities without collapsing Founder authority.",
+            privilege_tier=PrivilegeTier.INTERNAL_EXECUTION,
+            allowed_capabilities=["prioritize", "recommend", "internal_handoff"],
+            prohibited_capabilities=["spending", "publication_release", "contract_signature"],
+            verifier_office="vera",
+        ))
+        self.runtime.register_office(OfficeIdentity(
+            office_id="diana",
+            office_name="Operations",
+            council_member="Diana Sha",
+            mission="Orchestrate authorized work, dispatch, follow through, recover stale work and advance dependencies.",
+            privilege_tier=PrivilegeTier.INTERNAL_EXECUTION,
+            allowed_capabilities=["dispatch", "ack_tracking", "dependency_advancement", "internal_handoff"],
+            prohibited_capabilities=["spending", "publication_release", "contract_signature"],
+            verifier_office="vera",
+        ))
+        self.runtime.register_office(OfficeIdentity(
+            office_id="vera",
+            office_name="Independent Verification",
+            council_member="Vera",
+            mission="Independently verify evidence and accept or reject bounded work.",
+            privilege_tier=PrivilegeTier.INTERNAL_EXECUTION,
+            allowed_capabilities=["verify_internal_evidence"],
+            prohibited_capabilities=["self_approval_of_produced_work"],
+        ))
+        self.runtime.bind_worker(WorkerBinding("lex.worker.v0", "lex", "test-runtime"))
+        self.runtime.bind_worker(WorkerBinding("diana.worker.v0", "diana", "test-runtime"))
+        self.runtime.bind_worker(WorkerBinding("vera.worker.v0", "vera", "test-runtime"))
+        for worker in self.runtime.workers:
+            self.runtime.heartbeat(worker)
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def test_lex_to_diana_to_vera_then_advance(self):
+        assignment = Assignment(
+            assignment_id=new_id("asg"),
+            originating_office="lex",
+            receiving_office="diana",
+            mission="Convert approved portfolio priority into an executable internal dispatch plan.",
+            requested_outcome="Dispatch-ready operations plan with next dependency identified.",
+            evidence_required=["operations_plan"],
+            verification_route="vera",
+            privilege_tier_required=PrivilegeTier.INTERNAL_EXECUTION,
+            next_dependency="activate first bounded Office worker",
+        )
+        assignment.founder_gate = detect_founder_gate(
+            requested_capabilities=["dispatch", "internal_handoff"],
+            privilege_tier_required=assignment.privilege_tier_required,
+        )
+        self.assertIsNone(assignment.founder_gate)
+
+        self.runtime.create_assignment(assignment)
+        self.runtime.dispatch(assignment.assignment_id, "diana.worker.v0")
+        self.runtime.acknowledge(assignment.assignment_id, "diana.worker.v0")
+        self.runtime.start(assignment.assignment_id, "diana.worker.v0")
+        receipt = self.runtime.submit_evidence(
+            assignment.assignment_id,
+            "diana.worker.v0",
+            evidence_type="operations_plan",
+            location="ledger://proof/lex-diana-operations-plan",
+            metadata={"next_dependency": assignment.next_dependency},
+        )
+        self.assertTrue(receipt.receipt_id)
+        self.runtime.ready_for_verification(assignment.assignment_id, "diana.worker.v0")
+        self.runtime.accept_verification(assignment.assignment_id, "vera")
+        completed = self.runtime.complete(assignment.assignment_id)
+
+        self.assertEqual(completed.state.value, "completed")
+        self.assertEqual(completed.verification_state.value, "accepted")
+        self.assertEqual(completed.next_dependency, "activate first bounded Office worker")
+        self.assertIsNone(self.runtime.workers["diana.worker.v0"].current_assignment_id)
+
+        event_types = [r["payload"]["event_type"] for r in self.ledger.records("event")]
+        self.assertIn("assignment_acknowledged", event_types)
+        self.assertIn("verification_accepted", event_types)
+        self.assertIn("assignment_completed", event_types)
+
+    def test_founder_gate_is_detected_not_bypassed(self):
+        gate = detect_founder_gate(
+            requested_capabilities=["spending"],
+            privilege_tier_required=PrivilegeTier.INTERNAL_EXECUTION,
+        )
+        self.assertIsNotNone(gate)
+        self.assertEqual(gate.gate_type, "spending")
+
+    def test_wrong_office_worker_cannot_accept_dispatch(self):
+        assignment = Assignment(
+            assignment_id=new_id("asg"),
+            originating_office="lex",
+            receiving_office="diana",
+            mission="Bounded internal operations work.",
+            requested_outcome="Operations artifact.",
+            evidence_required=[],
+            verification_route="vera",
+        )
+        self.runtime.create_assignment(assignment)
+        with self.assertRaises(RuntimeViolation):
+            self.runtime.dispatch(assignment.assignment_id, "lex.worker.v0")
+
+
+if __name__ == "__main__":
+    unittest.main()
