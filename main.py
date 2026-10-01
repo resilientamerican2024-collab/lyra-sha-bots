@@ -405,10 +405,6 @@ def main():
     scheduler.add_job(scheduled_fb_token_refresh, CronTrigger(hour=8, minute=5, timezone=MOUNTAIN),
                       id="fb_token_refresh", name="FB Token Auto-Refresh")
 
-    # Reddit bot: every 2 hours at :15
-    scheduler.add_job(run_reddit_bot, CronTrigger(hour="*/2", minute=15, timezone=MOUNTAIN),
-                      id="reddit_bot", name="Reddit Bot")
-
     # Yelp bot: once daily at 9:20am Mountain
     scheduler.add_job(run_yelp_bot, CronTrigger(hour=9, minute=20, timezone=MOUNTAIN),
                       id="yelp_bot", name="Yelp Bot")
@@ -417,7 +413,6 @@ def main():
     log.info("  • Comment Bot  — every :00 and :30")
     log.info("  • Review Bot   — every hour at :05")
     log.info("  • Daily Leads  — 8:00 AM Mountain daily")
-    log.info("  • Reddit Bot   — every 2 hours at :15")
     log.info("  • Yelp Bot     — 9:20 AM Mountain daily")
     # Start Review Request Bot web server in background thread
     rrb_thread = threading.Thread(target=run_review_request_server, daemon=True)
@@ -433,7 +428,6 @@ def main():
         run_comment_bot()
         run_review_bot()
         run_daily_leads()
-        run_reddit_bot()
         run_yelp_bot()
     else:
         log.info("Startup bot runs disabled; jobs will run only on their schedules.")
