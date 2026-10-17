@@ -310,7 +310,7 @@ def process_order(order_id):
     try:
         with db() as c:
             o = c.execute("SELECT * FROM orders WHERE order_id=?", (order_id,)).fetchone()
-        if not o or o["status"] in ("EMAIL_SENT", "FULFILLED"):
+        if not o or o["status"] in ("EMAIL_SENT", "FULFILLED", "SHORTFALL"):
             return
         if o["attempts"] >= MAX_ATTEMPTS:
             return
@@ -327,6 +327,11 @@ def process_order(order_id):
                 event(order_id, "VALIDATION", json.dumps({"raw": len(raw), "kept": len(rows), "rejected": rej}))
                 if not rows:
                     raise RuntimeError("no valid leads after validation")
+                if str(order_id).startswith("STRIPE-") and len(rows) < int(o["quantity"]):
+                    # paid order: never deliver or mark fulfilled with fewer contacts than purchased
+                    set_status(order_id, "SHORTFALL", lead_count=len(rows),
+                               last_error=f"only {len(rows)} valid contacts of {o['quantity']} purchased; NOT delivered, refund due")
+                    return
                 set_status(order_id, "VALIDATED", lead_count=len(rows))
                 csv_path = write_csv(order_id, rows)
                 set_status(order_id, "CSV_READY", csv_path=csv_path, lead_count=len(rows))
