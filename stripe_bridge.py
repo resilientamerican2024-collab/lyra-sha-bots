@@ -32,6 +32,31 @@ def _tbl():
         c.execute("CREATE TABLE IF NOT EXISTS stripe_orders(order_id TEXT PRIMARY KEY, session_id TEXT, payment_intent TEXT, amount INTEGER, livemode INTEGER, refund_due INTEGER DEFAULT 0, note TEXT)")
 
 
+def auto_refund(oid, pi, livemode):
+    """Full refund of an unfulfillable paid order. TEST MODE ONLY unless STRIPE_AUTO_REFUND_LIVE=1.
+    Needs STRIPE_AUTO_REFUND=1 and STRIPE_REFUND_KEY (restricted key, Refunds write only). Idempotent per order.
+    Returns (ok, detail). Never raises."""
+    try:
+        if not _flag("STRIPE_AUTO_REFUND"):
+            return False, "auto-refund disabled"
+        key = os.environ.get("STRIPE_REFUND_KEY", "")
+        if not key or not pi.startswith("pi_"):
+            return False, "no refund key or payment intent"
+        live_key = key.startswith(("rk_live_", "sk_live_"))
+        if (live_key or livemode) and not _flag("STRIPE_AUTO_REFUND_LIVE"):
+            return False, "live-mode refunds disabled"
+        r = requests.post("https://api.stripe.com/v1/refunds", timeout=30, auth=(key, ""),
+                          headers={"Idempotency-Key": "refund-" + oid},
+                          data={"payment_intent": pi, "reason": "requested_by_customer",
+                                "metadata[order_id]": oid, "metadata[cause]": "unfulfillable"})
+        j = r.json()
+        if r.ok:
+            return True, f"{j.get('id')} status={j.get('status')} amount={j.get('amount')}"
+        return False, f"stripe error {r.status_code}: {(j.get('error') or {}).get('message','')[:120]}"
+    except Exception as e:
+        return False, f"exception {type(e).__name__}"
+
+
 def _run(oid):
     """Fulfil with bounded retries; if not FULFILLED, flag refund due and alert the founder once."""
     st = None
@@ -49,9 +74,16 @@ def _run(oid):
             c.execute("UPDATE stripe_orders SET refund_due=1, note=? WHERE order_id=?", (f"{st}: {err}", oid))
         of.event(oid, "REFUND_DUE", f"{st}: {err}")
         pi = row["payment_intent"] if row else "?"
-        alert(f"{oid} NOT fulfilled ({st}) - refund due",
+        with of.db() as c:
+            lm = c.execute("SELECT livemode FROM stripe_orders WHERE order_id=?", (oid,)).fetchone()
+        ok, det = auto_refund(oid, pi, bool(lm and lm[0]))
+        of.event(oid, "REFUND_ISSUED" if ok else "REFUND_NOT_AUTOMATED", det)
+        if ok:
+            with of.db() as c:
+                c.execute("UPDATE stripe_orders SET refund_due=0, note=? WHERE order_id=?", (f"AUTO-REFUNDED {det}", oid))
+        alert(f"{oid} NOT fulfilled ({st}) - " + ("AUTO-REFUNDED" if ok else "refund due"),
               f"Order {oid} could not be fulfilled.\nStatus: {st}\nReason: {err}\nPayment: {pi}  amount (cents): {row['amount'] if row else '?'}\n"
-              f"Customer was NOT sent a partial list.\nAction: refund this payment in the Stripe dashboard (Payments > the payment > Refund).")
+              f"Customer was NOT sent a partial list.\n" + (f"Full refund issued automatically: {det}" if ok else f"Auto-refund not performed ({det}).\nAction: refund this payment in the Stripe dashboard (Payments > the payment > Refund)."))
 
 
 def _flag(name):
