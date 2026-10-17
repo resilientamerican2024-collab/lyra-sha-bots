@@ -48,7 +48,7 @@ bp = Blueprint("order_fulfillment", __name__)
 HERE = Path(__file__).resolve().parent
 MAX_ATTEMPTS = 3
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
-CSV_COLUMNS = ["name", "address", "phone", "website", "rating", "review_count", "source", "source_url"]
+CSV_COLUMNS = ["name", "category", "address", "phone", "website", "rating", "review_count", "source", "source_url"]
 
 
 def data_dir():
@@ -127,17 +127,50 @@ def source_osm(btype, city, state, limit):
     raise RuntimeError(f"OSM lead source unavailable: {last}")
 
 
+# Niche configuration: NO per-niche code. Unknown business_type falls back to using the text as the search term.
+# query = Google search phrase; words = relevance words (any one must appear in the business name or Google's category label).
+NICHES = {
+    "plumber": {"query": "plumber", "words": ["plumb", "drain", "rooter", "sewer", "pipe", "water heater"]},
+    "landscaper": {"query": "landscaping company", "words": ["landscap", "lawn", "yard", "garden", "tree", "sprinkler", "irrigation"]},
+    "window installer": {"query": "window installation company", "words": ["window", "glass", "door", "glazing"]},
+    "insulation contractor": {"query": "insulation contractor", "words": ["insulat", "spray foam", "energy"]},
+    "roofer": {"query": "roofing contractor", "words": ["roof", "shingle", "exterior"]},
+    "hvac": {"query": "HVAC contractor", "words": ["hvac", "heating", "cooling", "air condition", "furnace", "mechanical", "refrigerat"]},
+    "well driller": {"query": "water well drilling contractor", "words": ["well", "drill", "pump", "water"]},
+}
+ALIASES = {"plumbers": "plumber", "plumbing": "plumber", "landscapers": "landscaper", "landscaping": "landscaper",
+           "window installers": "window installer", "windows": "window installer", "insulation": "insulation contractor",
+           "insulation contractors": "insulation contractor", "roofers": "roofer", "roofing": "roofer",
+           "hvac company": "hvac", "hvac companies": "hvac", "heating and cooling": "hvac",
+           "well drillers": "well driller", "well drilling": "well driller"}
+
+
+def niche_for(btype):
+    k = (btype or "").lower().strip()
+    k = ALIASES.get(k, k)
+    return NICHES.get(k, {"query": btype, "words": []}), (k if k in NICHES else "custom")
+
+
 def source_places(btype, city, state, limit):
-    """Existing lead_finder.py (Google Places). PAID; only when LEADS_PROVIDER=places."""
+    """Existing lead_finder.py (Google Places). PAID; only when LEADS_PROVIDER=places. Pages requested = ceil(limit/20)."""
     import lead_finder
     key = os.environ.get("PLACES_API_KEY", "")
     if not key:
         raise RuntimeError("PLACES_API_KEY not set")
-    rows = [lead_finder.to_row(p) for p in lead_finder.search(key, f"{btype} in {city}, {state}", limit)]
-    return [{"name": r["name"], "address": r["address"], "phone": r["phone"], "website": r["website"],
-             "rating": r["rating"], "review_count": r["review_count"], "source": "Google Places",
-             "source_url": r["google_maps_url"], "_city": city,
-             "_closed": r["status"] in ("CLOSED_PERMANENTLY", "CLOSED_TEMPORARILY")} for r in rows]
+    lead_finder.FIELD_MASK = lead_finder.FIELD_MASK + ",places.primaryTypeDisplayName,places.addressComponents"
+    niche, _ = niche_for(btype)
+    out = []
+    for p in lead_finder.search(key, f"{niche['query']} in {city}, {state}", limit):
+        r = lead_finder.to_row(p)
+        comps = p.get("addressComponents", [])
+        locality = next((c.get("longText", "") for c in comps if "locality" in c.get("types", [])), "")
+        out.append({"name": r["name"], "address": r["address"], "phone": r["phone"], "website": r["website"],
+                    "rating": r["rating"], "review_count": r["review_count"], "source": "Google Places",
+                    "source_url": r["google_maps_url"], "_city": locality or city,
+                    "_closed": r["status"] in ("CLOSED_PERMANENTLY", "CLOSED_TEMPORARILY"),
+                    "_category": (p.get("primaryTypeDisplayName") or {}).get("text", ""),
+                    "_address_text": r["address"]})
+    return out
 
 
 def find_leads(btype, city, state, limit):
@@ -162,9 +195,9 @@ def norm_site(w):
     return w if re.match(r"^https?://[^\s/]+\.[^\s/]+", w) else ""
 
 
-def validate_and_dedupe(leads, city, limit):
+def validate_and_dedupe(leads, city, limit, words=None):
     """Keep: has a name, is open, in the target city, has a valid phone OR website. Dedupe by phone, then name."""
-    seen_phone, seen_name, out, rejected = set(), set(), [], {"no_name": 0, "closed": 0, "wrong_city": 0, "no_contact": 0, "duplicate": 0}
+    seen_phone, seen_name, out, rejected = set(), set(), [], {"no_name": 0, "closed": 0, "wrong_city": 0, "no_contact": 0, "duplicate": 0, "not_relevant": 0}
     for l in leads:
         name = (l.get("name") or "").strip()
         if not name:
@@ -173,6 +206,10 @@ def validate_and_dedupe(leads, city, limit):
             rejected["closed"] += 1; continue
         if l.get("_city") and l["_city"].strip().lower() != city.strip().lower():
             rejected["wrong_city"] += 1; continue
+        if words:
+            hay = (name + " " + (l.get("_category") or "")).lower()
+            if not any(w in hay for w in words):
+                rejected["not_relevant"] += 1; continue
         phone, site = norm_phone(l.get("phone")), norm_site(l.get("website"))
         if not phone and not site:
             rejected["no_contact"] += 1; continue
@@ -181,7 +218,8 @@ def validate_and_dedupe(leads, city, limit):
             rejected["duplicate"] += 1; continue
         seen_phone.add(phone) if phone else None
         seen_name.add(nk)
-        out.append({**{k: l.get(k, "") for k in CSV_COLUMNS}, "name": name, "phone": phone, "website": site})
+        out.append({**{k: l.get(k, "") for k in CSV_COLUMNS}, "name": name, "phone": phone, "website": site,
+                    "category": l.get("_category", "")})
         if len(out) >= limit:
             break
     return out, rejected
@@ -272,9 +310,9 @@ def process_order(order_id):
         try:
             csv_path = o["csv_path"] if o["csv_path"] and os.path.exists(o["csv_path"]) else None
             if not csv_path:
-                raw = find_leads(o["business_type"], o["city"], o["state"], limit * 3)
+                raw = find_leads(o["business_type"], o["city"], o["state"], limit * 2)
                 set_status(order_id, "LEADS_FOUND", lead_count=len(raw))
-                rows, rej = validate_and_dedupe(raw, o["city"], limit)
+                rows, rej = validate_and_dedupe(raw, o["city"], limit, niche_for(o["business_type"])[0]["words"])
                 event(order_id, "VALIDATION", json.dumps({"raw": len(raw), "kept": len(rows), "rejected": rej}))
                 if not rows:
                     raise RuntimeError("no valid leads after validation")
