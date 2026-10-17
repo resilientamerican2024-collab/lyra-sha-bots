@@ -27,6 +27,17 @@ def unsubscribe():
     return PAGE % ("<p>Unsubscribe <b>%s</b> from Lyra Sha AI emails?</p><form method=post><input type=hidden name=e value='%s'><input type=hidden name=t value='%s'><button>Confirm unsubscribe</button></form>" % (__import__("html").escape(e), __import__("html").escape(e, True), __import__("html").escape(t, True)))
 
 
+@app.route("/suppression-check")
+def suppression_check():
+    """Auth'd (X-Status-Key = webhook secret): returns send-gate result for one address."""
+    import hmac as _h
+    key = os.environ.get("ORDER_WEBHOOK_SECRET", "")
+    if not key or not _h.compare_digest(request.headers.get("X-Status-Key", ""), key):
+        return jsonify(error="unauthorized"), 401
+    e = (request.args.get("e") or "").strip().lower()
+    return jsonify(email=e, suppressed=oc.is_suppressed(e), preflight=oc.preflight(e, "body"))
+
+
 @app.route("/health")
 def health():
     return jsonify(ok=True)
