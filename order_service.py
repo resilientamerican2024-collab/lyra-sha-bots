@@ -38,6 +38,41 @@ def suppression_check():
     return jsonify(email=e, suppressed=oc.is_suppressed(e), preflight=oc.preflight(e, "body"))
 
 
+ALLOWED_DEFAULT = "ingrid@lyrashaai.com"
+
+
+@app.route("/outreach/send", methods=["POST"])
+def outreach_send():
+    """Authenticated (X-Status-Key). Body JSON: to, subject, body (may contain {UNSUB_URL}), dry_run.
+    Only recipients listed in OUTREACH_ALLOWED_RECIPIENTS (default: founder only) can be sent to."""
+    import hmac as _h, requests as _rq
+    key = os.environ.get("ORDER_WEBHOOK_SECRET", "")
+    if not key or not _h.compare_digest(request.headers.get("X-Status-Key", ""), key):
+        return jsonify(error="unauthorized"), 401
+    j = request.get_json(force=True, silent=True) or {}
+    to = (j.get("to") or "").strip().lower(); subject = j.get("subject") or ""
+    allowed = [a.strip().lower() for a in os.environ.get("OUTREACH_ALLOWED_RECIPIENTS", ALLOWED_DEFAULT).split(",") if a.strip()]
+    if to not in allowed:
+        return jsonify(error="recipient not in OUTREACH_ALLOWED_RECIPIENTS"), 403
+    link = oc.unsub_url(to)
+    text = (j.get("body") or "").replace("{UNSUB_URL}", link)
+    blockers = oc.preflight(to, text)
+    if "{UNSUB_URL}" in (j.get("body") or "") and not link:
+        blockers.append("no unsubscribe link")
+    if blockers:
+        return jsonify(sent=False, blockers=blockers), 409
+    payload = {"from": oc.FROM, "to": [to], "reply_to": oc.REPLY_TO, "subject": subject, "text": text, "headers": oc.headers(to)}
+    if j.get("dry_run", True):
+        return jsonify(sent=False, dry_run=True, payload=payload)
+    r = _rq.post("https://api.resend.com/emails", json=payload, timeout=30,
+                 headers={"Authorization": "Bearer " + os.environ["RESEND_API_KEY"], "Idempotency-Key": j.get("idem") or ""})
+    rid = (r.json() or {}).get("id") if r.ok else None
+    if rid:
+        with oc._db() as c:
+            c.execute("INSERT INTO sent VALUES(?,?,?,datetime('now'))", (to, j.get("campaign", "test"), rid))
+    return jsonify(sent=bool(rid), status=r.status_code, resend_id=rid, error=None if rid else r.text[:200])
+
+
 @app.route("/health")
 def health():
     return jsonify(ok=True)
