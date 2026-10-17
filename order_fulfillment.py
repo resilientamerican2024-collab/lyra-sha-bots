@@ -48,7 +48,7 @@ bp = Blueprint("order_fulfillment", __name__)
 HERE = Path(__file__).resolve().parent
 MAX_ATTEMPTS = 3
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
-CSV_COLUMNS = ["name", "category", "address", "phone", "website", "rating", "review_count", "source", "source_url"]
+CSV_COLUMNS = ["name", "category", "address", "phone", "website", "rating", "review_count", "source", "source_url", "review_flag"]
 
 
 def data_dir():
@@ -195,6 +195,16 @@ def norm_site(w):
     return w if re.match(r"^https?://[^\s/]+\.[^\s/]+", w) else ""
 
 
+def address_flag(addr, city):
+    """Mark incomplete addresses for human review instead of silently shipping them."""
+    a = (addr or "").strip()
+    if not a:
+        return "REVIEW: no address"
+    if not re.match(r"^\d", a) or city.lower() not in a.lower() or " and," in a.lower():
+        return "REVIEW: address incomplete or intersection only"
+    return ""
+
+
 def validate_and_dedupe(leads, city, limit, words=None):
     """Keep: has a name, is open, in the target city, has a valid phone OR website. Dedupe by phone, then name."""
     seen_phone, seen_name, out, rejected = set(), set(), [], {"no_name": 0, "closed": 0, "wrong_city": 0, "no_contact": 0, "duplicate": 0, "not_relevant": 0}
@@ -219,7 +229,8 @@ def validate_and_dedupe(leads, city, limit, words=None):
         seen_phone.add(phone) if phone else None
         seen_name.add(nk)
         out.append({**{k: l.get(k, "") for k in CSV_COLUMNS}, "name": name, "phone": phone, "website": site,
-                    "category": l.get("_category", "")})
+                    "category": l.get("_category", ""),
+                    "review_flag": address_flag(l.get("address", ""), city)})
         if len(out) >= limit:
             break
     return out, rejected
