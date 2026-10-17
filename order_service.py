@@ -4,10 +4,13 @@ import os
 from flask import Flask, jsonify, request, make_response
 import order_fulfillment as of
 import outreach_compliance as oc
+import stripe_bridge
 
 app = Flask(__name__)
 os.environ.setdefault("ORDER_FULFILLMENT_ENABLED", "1")
 of.register(app)
+if os.environ.get("STRIPE_WEBHOOK_SECRET"):
+    app.register_blueprint(stripe_bridge.bp)
 
 
 PAGE = "<!doctype html><meta name=viewport content='width=device-width,initial-scale=1'><body style='font-family:system-ui;max-width:480px;margin:60px auto;padding:0 16px'><h2>Lyra Sha AI</h2>%s</body>"
