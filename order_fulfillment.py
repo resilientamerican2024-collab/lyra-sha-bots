@@ -48,7 +48,7 @@ bp = Blueprint("order_fulfillment", __name__)
 HERE = Path(__file__).resolve().parent
 MAX_ATTEMPTS = 3
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
-CSV_COLUMNS = ["name", "category", "address", "phone", "website", "rating", "review_count", "source", "source_url", "review_flag"]
+CSV_COLUMNS = ["name", "category", "address", "phone", "website", "rating", "review_count", "source", "source_url", "review_flag", "confidence", "source_release", "data_attribution"]
 
 
 def data_dir():
@@ -175,6 +175,9 @@ def source_places(btype, city, state, limit):
 
 def find_leads(btype, city, state, limit):
     prov = os.environ.get("LEADS_PROVIDER", "osm").lower()
+    if prov == "overture":
+        import overture_provider
+        return overture_provider.source_overture(btype, city, state, limit, niche_for(btype)[1])
     return (source_places if prov == "places" else source_osm)(btype, city, state, limit)
 
 
@@ -228,9 +231,15 @@ def validate_and_dedupe(leads, city, limit, words=None):
             rejected["duplicate"] += 1; continue
         seen_phone.add(phone) if phone else None
         seen_name.add(nk)
+        flag = address_flag(l.get("address", ""), city)
+        if l.get("_national"):
+            flag = (flag + "; " if flag else "") + "REVIEW: national brand listing (local office)"
+        attr = ""
+        if l.get("_datasets") is not None:
+            import overture_provider
+            attr = overture_provider.attribution(l["_datasets"], l.get("source_release", ""))
         out.append({**{k: l.get(k, "") for k in CSV_COLUMNS}, "name": name, "phone": phone, "website": site,
-                    "category": l.get("_category", ""),
-                    "review_flag": address_flag(l.get("address", ""), city)})
+                    "category": l.get("_category", ""), "review_flag": flag, "data_attribution": attr})
         if len(out) >= limit:
             break
     return out, rejected
@@ -325,6 +334,10 @@ def process_order(order_id):
                 set_status(order_id, "LEADS_FOUND", lead_count=len(raw))
                 rows, rej = validate_and_dedupe(raw, o["city"], limit, niche_for(o["business_type"])[0]["words"])
                 event(order_id, "VALIDATION", json.dumps({"raw": len(raw), "kept": len(rows), "rejected": rej}))
+                if not rows and str(order_id).startswith("STRIPE-"):
+                    set_status(order_id, "SHORTFALL", lead_count=0,
+                               last_error=f"0 valid contacts of {o['quantity']} purchased for {o['business_type']} in {o['city']}, {o['state']}; NOT delivered, refund due")
+                    return
                 if not rows:
                     raise RuntimeError("no valid leads after validation")
                 if str(order_id).startswith("STRIPE-") and len(rows) < int(o["quantity"]):
@@ -338,10 +351,20 @@ def process_order(order_id):
             with db() as c:
                 n = c.execute("SELECT lead_count FROM orders WHERE order_id=?", (order_id,)).fetchone()[0]
             tag = "[TEST] " if o["is_test"] else ""
+            attr_note = ""
+            try:
+                with open(csv_path, newline="", encoding="utf-8") as _f:
+                    _first = next(csv.DictReader(_f), {})
+                if _first.get("data_attribution"):
+                    attr_note = "\n\nData source: " + _first["data_attribution"]
+            except Exception:
+                pass
             mid = send_email(
-                o["customer_email"], f"{tag}Your {o['city']} {o['business_type']} lead list ({n} leads)",
-                f"{tag}Order {order_id}: attached is your lead list for {o['business_type']} businesses in "
-                f"{o['city']}, {o['state']}. Phone numbers and websites come from public listings; please verify before outreach.\n\n-- Lyra Sha AI",
+                o["customer_email"], f"{tag}Your {n} local {o['business_type']} business contacts in {o['city']}, {o['state']}",
+                f"{tag}Order {order_id}: attached are {n} local business contacts for {o['business_type']} businesses in "
+                f"{o['city']}, {o['state']}. This is publicly available business information (business name, address, and phone number and/or website where available). "
+                f"It is not a list of interested customers, not verified email addresses, and not a guarantee of replies or sales. "
+                f"Please verify details before outreach and follow applicable email and phone marketing laws.{attr_note}\n\n-- Lyra Sha AI",
                 csv_path, idem=f"order-{order_id}")
             set_status(order_id, "EMAIL_SENT", message_id=mid)  # SMTP server accepted the message
             set_status(order_id, "FULFILLED", message_id=mid)
