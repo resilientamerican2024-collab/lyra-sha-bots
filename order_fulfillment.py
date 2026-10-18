@@ -208,9 +208,9 @@ def address_flag(addr, city):
     return ""
 
 
-def validate_and_dedupe(leads, city, limit, words=None):
+def validate_and_dedupe(leads, city, limit, words=None, niche=None, state=""):
     """Keep: has a name, is open, in the target city, has a valid phone OR website. Dedupe by phone, then name."""
-    seen_phone, seen_name, out, rejected = set(), set(), [], {"no_name": 0, "closed": 0, "wrong_city": 0, "no_contact": 0, "duplicate": 0, "not_relevant": 0}
+    seen_phone, seen_name, seen_host, out, rejected = set(), set(), set(), [], {"no_name": 0, "closed": 0, "wrong_city": 0, "no_contact": 0, "duplicate": 0, "not_relevant": 0, "supplier_or_brand": 0, "wrong_category": 0, "out_of_area": 0}
     for l in leads:
         name = (l.get("name") or "").strip()
         if not name:
@@ -224,13 +224,20 @@ def validate_and_dedupe(leads, city, limit, words=None):
             if not any(w in hay for w in words):
                 rejected["not_relevant"] += 1; continue
         phone, site = norm_phone(l.get("phone")), norm_site(l.get("website"))
+        if niche:
+            import relevance
+            rr = relevance.reject_reason(l, niche, state, re.sub(r"\D", "", phone))
+            if rr:
+                rejected[rr[0]] += 1; continue
         if not phone and not site:
             rejected["no_contact"] += 1; continue
         nk = re.sub(r"[^a-z0-9]", "", name.lower())
-        if (phone and phone in seen_phone) or nk in seen_name:
+        hk = re.sub(r"^https?://(www\.)?|[/?#].*$", "", site.lower()) if site else ""
+        if (phone and phone in seen_phone) or nk in seen_name or (hk and hk in seen_host):
             rejected["duplicate"] += 1; continue
         seen_phone.add(phone) if phone else None
         seen_name.add(nk)
+        seen_host.add(hk) if hk else None
         flag = address_flag(l.get("address", ""), city)
         if l.get("_national"):
             flag = (flag + "; " if flag else "") + "REVIEW: national brand listing (local office)"
@@ -338,7 +345,7 @@ def process_order(order_id):
             if not csv_path:
                 raw = find_leads(o["business_type"], o["city"], o["state"], limit * 2)
                 set_status(order_id, "LEADS_FOUND", lead_count=len(raw))
-                rows, rej = validate_and_dedupe(raw, o["city"], limit, niche_for(o["business_type"])[0]["words"])
+                rows, rej = validate_and_dedupe(raw, o["city"], limit, niche_for(o["business_type"])[0]["words"], niche_for(o["business_type"])[1], o["state"])
                 event(order_id, "VALIDATION", json.dumps({"raw": len(raw), "kept": len(rows), "rejected": rej}))
                 if not rows and str(order_id).startswith("STRIPE-"):
                     set_status(order_id, "SHORTFALL", lead_count=0,
@@ -472,5 +479,7 @@ def register(app):
     if os.environ.get("ORDER_FULFILLMENT_ENABLED", "").lower() in ("1", "true", "yes"):
         init_db()
         app.register_blueprint(bp)
+        import checkout_gate
+        app.register_blueprint(checkout_gate.bp2)
         resume_unfinished()
         log.info("order fulfillment webhook enabled")
