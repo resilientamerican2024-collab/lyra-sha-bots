@@ -325,6 +325,12 @@ def process_order(order_id):
             return
         with db() as c:
             c.execute("UPDATE orders SET attempts=attempts+1 WHERE order_id=?", (order_id,))
+        if not industry_ok(o["business_type"]):
+            # paid order for an industry outside the launch menu: never fulfil, refund path handles it
+            set_status(order_id, "SHORTFALL", lead_count=0,
+                       last_error=f"industry '{o['business_type']}' not available at launch; NOT delivered, refund due")
+            event(order_id, "INDUSTRY_NOT_ALLOWED", o["business_type"])
+            return
         set_status(order_id, "PROCESSING")
         limit = min(int(o["quantity"]), int(os.environ.get("FULFILLMENT_MAX_LEADS", "25")))
         try:
@@ -393,6 +399,22 @@ def secret():
     return os.environ.get("ORDER_WEBHOOK_SECRET", "")
 
 
+def allowed_niches():
+    """Launch menu lock (env ALLOWED_NICHES, default plumber,roofer,landscaper). Backend enforcement, independent of the website menu."""
+    return {x.strip().lower() for x in os.environ.get("ALLOWED_NICHES", "plumber,roofer,landscaper").split(",") if x.strip()}
+
+
+def industry_ok(btype):
+    return niche_for(btype)[1] in allowed_niches()
+
+
+@bp.route("/eligibility", methods=["GET"])
+def eligibility():
+    """Pre-payment check for a checkout-session creator: GET /eligibility?business_type=plumber"""
+    b = request.args.get("business_type", "")
+    return jsonify(business_type=b, eligible=industry_ok(b), allowed=sorted(allowed_niches()))
+
+
 @bp.route("/webhook/order", methods=["POST"])
 def order_webhook():
     if not secret():
@@ -412,6 +434,8 @@ def order_webhook():
         return jsonify(error="invalid order"), 400
     if not re.match(r"^[A-Za-z0-9_-]{3,64}$", oid) or not EMAIL_RE.match(email) or not btype or not city or not 1 <= qty <= 500:
         return jsonify(error="invalid order fields"), 400
+    if not industry_ok(btype):
+        return jsonify(error="industry not available", allowed=sorted(allowed_niches())), 422
     allowed = [e.strip().lower() for e in os.environ.get("FULFILLMENT_TEST_RECIPIENTS", "ingrid@lyrashaai.com").split(",")]
     if is_test and email not in allowed:
         return jsonify(error="test orders may only email allowlisted recipients"), 400
