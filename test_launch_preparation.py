@@ -67,7 +67,17 @@ class LaunchPreparation(unittest.TestCase):
         for name in (*lc.LIVE_FLAGS,'STRIPE_AUTO_REFUND','STRIPE_REFUND_KEY','STRIPE_CHECKOUT_KEY','RESEND_API_KEY','STRIPE_WEBHOOK_SECRET','RAILWAY_VOLUME_MOUNT_PATH'):
             with self.subTest(name=name), patch.dict(os.environ,{name:''}):
                 self.assertTrue(lc.live_blockers())
-                with self.assertRaises(RuntimeError): lc.validate_startup()
+                if name == "STRIPE_CHECKOUT_LIVE":
+                    lc.validate_startup() # safe drain mode
+                else:
+                    with self.assertRaises(RuntimeError): lc.validate_startup()
+
+    def test_rollback_closes_checkout_but_keeps_paid_order_service_running(self):
+        self.live(); os.environ['STRIPE_CHECKOUT_LIVE']='0'
+        lc.validate_startup()
+        with patch.object(cg,'qualified_count',return_value=10):
+            self.assertEqual(self.client.post('/checkout/session',json=self.order).status_code,403)
+        self.post.assert_not_called()
 
     def test_live_checkout_exact_price_and_spanish(self):
         self.live(); os.environ['CHECKOUT_PRICE_CENTS']='1'

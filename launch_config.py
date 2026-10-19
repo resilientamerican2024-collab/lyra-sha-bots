@@ -5,8 +5,9 @@ from pathlib import Path
 LIVE_FLAGS = ("STRIPE_CHECKOUT_LIVE", "STRIPE_ACCEPT_LIVE", "STRIPE_DELIVER_TO_CUSTOMER", "STRIPE_AUTO_REFUND_LIVE")
 
 
-def live_blockers():
-    blockers = [name + " must be 1" for name in (*LIVE_FLAGS, "STRIPE_AUTO_REFUND") if os.environ.get(name) != "1"]
+def live_blockers(require_checkout=True):
+    flags = LIVE_FLAGS if require_checkout else LIVE_FLAGS[1:]
+    blockers = [name + " must be 1" for name in (*flags, "STRIPE_AUTO_REFUND") if os.environ.get(name) != "1"]
     for name in ("STRIPE_CHECKOUT_KEY", "STRIPE_REFUND_KEY"):
         if not os.environ.get(name, "").startswith("rk_live_"):
             blockers.append(name + " requires a restricted live key")
@@ -30,6 +31,7 @@ def live_blockers():
 
 def validate_startup():
     if any(os.environ.get(name, "").lower() in ("1", "true", "yes") for name in LIVE_FLAGS):
-        blockers = live_blockers()
+        # Checkout may be off while already-paid orders continue draining.
+        blockers = live_blockers(require_checkout=os.environ.get("STRIPE_CHECKOUT_LIVE") == "1")
         if blockers:
             raise RuntimeError("Live launch blocked: " + "; ".join(blockers))
