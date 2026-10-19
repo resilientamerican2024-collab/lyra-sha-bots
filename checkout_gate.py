@@ -6,6 +6,7 @@ otherwise it returns the validated session parameters (dry run). Live keys requi
 auto-refund in order_fulfillment/stripe_bridge remain as backup. No fulfillment logic lives here."""
 import os, re, time, threading
 from flask import Blueprint, request, jsonify
+from urllib.parse import urlsplit, urlunsplit, parse_qsl, urlencode
 
 bp2 = Blueprint("checkout_gate", __name__)
 PRODUCT = "10-local-business-contacts"
@@ -16,6 +17,16 @@ _cache, _lk = {}, threading.Lock()
 def price_cents():
     # Founder-approved offer; configuration must not silently change the price.
     return 2900
+
+
+def return_url(name, locale):
+    url = os.environ.get(name, "https://lyrashaai.com/")
+    if locale == "auto":
+        return url
+    parts = urlsplit(url)
+    query = [(k, v) for k, v in parse_qsl(parts.query, keep_blank_values=True) if k != "lang"]
+    query.append(("lang", "es" if locale.startswith("es") else "en"))
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query, safe="{}"), parts.fragment))
 
 
 def qualified_count(niche, city, state):
@@ -72,8 +83,8 @@ def check(d):
               "line_items[0][price_data][product_data][name]": ("10 Local Business Contacts" if os.environ.get("STRIPE_CHECKOUT_LIVE") == "1" else "10 Local Business Contacts (TEST)"),
               "line_items[0][quantity]": "1", "metadata[business_type]": niche, "metadata[city]": "Cheyenne",
               "metadata[state]": "WY", "metadata[product]": PRODUCT, "locale": locale, "metadata[quantity]": "10", "metadata[prechecked]": "1",
-              "success_url": os.environ.get("CHECKOUT_SUCCESS_URL", "https://lyrashaai.com/"),
-              "cancel_url": os.environ.get("CHECKOUT_CANCEL_URL", "https://lyrashaai.com/")}
+              "success_url": return_url("CHECKOUT_SUCCESS_URL", locale),
+              "cancel_url": return_url("CHECKOUT_CANCEL_URL", locale)}
     if email:
         params["customer_email"] = email
     return True, 200, {"eligible": True, "qualified": n, "price_cents": price_cents(), "business_type": niche, "stripe_params": params}

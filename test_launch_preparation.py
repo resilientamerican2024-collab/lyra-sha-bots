@@ -76,8 +76,15 @@ class LaunchPreparation(unittest.TestCase):
             r=self.client.post('/checkout/session',json={**self.order,'locale':'es'})
         self.assertEqual(r.status_code,200)
         params=self.post.call_args.kwargs['data']
+        self.assertEqual(params['success_url'],'https://www.lyrashaai.com/leads/success?lang=es')
+        self.assertEqual(params['cancel_url'],'https://www.lyrashaai.com/leads/cancel?lang=es')
         self.assertEqual(params['locale'],'es'); self.assertEqual(params['line_items[0][price_data][unit_amount]'],'2900')
         self.assertNotIn('(TEST)',params['line_items[0][price_data][product_data][name]'])
+
+    def test_language_url_preserves_other_query_and_replaces_language(self):
+        os.environ['CHECKOUT_SUCCESS_URL']='https://www.lyrashaai.com/leads/success?session_id={CHECKOUT_SESSION_ID}&lang=en#receipt'
+        self.assertEqual(cg.return_url('CHECKOUT_SUCCESS_URL','es-419'),'https://www.lyrashaai.com/leads/success?session_id={CHECKOUT_SESSION_ID}&lang=es#receipt')
+        self.assertEqual(cg.return_url('CHECKOUT_SUCCESS_URL','auto'),os.environ['CHECKOUT_SUCCESS_URL'])
 
     def test_unavailable_and_short_inventory_never_calls_stripe(self):
         with patch.object(cg,'qualified_count',return_value=9):
