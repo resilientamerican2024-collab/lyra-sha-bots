@@ -396,8 +396,14 @@ def resume_unfinished():
         ids = [r[0] for r in c.execute(
             "SELECT order_id FROM orders WHERE status IN ('RECEIVED','PROCESSING','LEADS_FOUND','VALIDATED','CSV_READY','FAILED') AND attempts<?",
             (MAX_ATTEMPTS,))]
+    # Stripe recovery must include its refund/alert path, including exhausted retries.
+    import stripe_bridge
+    stripe_bridge.resume_unfinished()
+    with db() as c:
+        stripe_ids = {r[0] for r in c.execute("SELECT order_id FROM stripe_orders")}
     for i in ids:
-        threading.Thread(target=process_order, args=(i,), daemon=True).start()
+        if i not in stripe_ids:
+            threading.Thread(target=process_order, args=(i,), daemon=True).start()
     return ids
 
 
