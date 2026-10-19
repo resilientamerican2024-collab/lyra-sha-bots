@@ -6,6 +6,9 @@ import order_fulfillment as of
 import outreach_compliance as oc
 import stripe_bridge
 
+from launch_config import validate_startup
+validate_startup()
+
 app = Flask(__name__)
 os.environ.setdefault("ORDER_FULFILLMENT_ENABLED", "1")
 of.register(app)

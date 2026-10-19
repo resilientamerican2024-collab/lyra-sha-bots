@@ -1,20 +1,32 @@
-"""Pre-payment eligibility gate for the FUTURE checkout-session creator (test mode only).
+"""Pre-payment eligibility gate; live mode requires the complete explicit launch configuration.
 POST /checkout/session  {product, business_type, city, state, quantity[, email][, price_cents]}
 Validates BEFORE any Stripe session exists: approved product, allowed industry, launch location, quantity, price, and that
 enough qualified contacts exist right now. If STRIPE_CHECKOUT_KEY (a TEST-mode key) is set it then creates the Checkout Session;
-otherwise it returns the validated session parameters (dry run). Live keys are refused. The post-payment guards, idempotency and
+otherwise it returns the validated session parameters (dry run). Live keys require explicit launch gates. The post-payment guards, idempotency and
 auto-refund in order_fulfillment/stripe_bridge remain as backup. No fulfillment logic lives here."""
 import os, re, time, threading
 from flask import Blueprint, request, jsonify
+from urllib.parse import urlsplit, urlunsplit, parse_qsl, urlencode
 
 bp2 = Blueprint("checkout_gate", __name__)
 PRODUCT = "10-local-business-contacts"
-ALLOWED_KEYS = {"product", "business_type", "city", "state", "quantity", "email", "price_cents"}
+ALLOWED_KEYS = {"product", "business_type", "city", "state", "quantity", "email", "price_cents", "locale"}
 _cache, _lk = {}, threading.Lock()
 
 
 def price_cents():
-    return int(os.environ.get("CHECKOUT_PRICE_CENTS", "2900"))
+    # Founder-approved offer; configuration must not silently change the price.
+    return 2900
+
+
+def return_url(name, locale):
+    url = os.environ.get(name, "https://lyrashaai.com/")
+    if locale == "auto":
+        return url
+    parts = urlsplit(url)
+    query = [(k, v) for k, v in parse_qsl(parts.query, keep_blank_values=True) if k != "lang"]
+    query.append(("lang", "es" if locale.startswith("es") else "en"))
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query, safe="{}"), parts.fragment))
 
 
 def qualified_count(niche, city, state):
@@ -57,6 +69,9 @@ def check(d):
         return False, 422, {"error": "quantity must be exactly 10"}
     if "price_cents" in d and d["price_cents"] != price_cents():
         return False, 422, {"error": "price mismatch"}
+    locale = d.get("locale", "auto")
+    if locale not in ("auto", "en", "es", "es-419"):
+        return False, 422, {"error": "unsupported locale"}
     email = d.get("email")
     if email is not None and not (isinstance(email, str) and re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", email) and len(email) < 255):
         return False, 422, {"error": "invalid email"}
@@ -65,11 +80,11 @@ def check(d):
         return False, 409, {"error": "not enough qualified contacts right now", "qualified": n, "needed": 10}
     params = {"mode": "payment", "line_items[0][price_data][currency]": "usd",
               "line_items[0][price_data][unit_amount]": str(price_cents()),
-              "line_items[0][price_data][product_data][name]": "10 Local Business Contacts (TEST)",
+              "line_items[0][price_data][product_data][name]": ("10 Local Business Contacts" if os.environ.get("STRIPE_CHECKOUT_LIVE") == "1" else "10 Local Business Contacts (TEST)"),
               "line_items[0][quantity]": "1", "metadata[business_type]": niche, "metadata[city]": "Cheyenne",
-              "metadata[state]": "WY", "metadata[quantity]": "10", "metadata[prechecked]": "1",
-              "success_url": os.environ.get("CHECKOUT_SUCCESS_URL", "https://lyrashaai.com/"),
-              "cancel_url": os.environ.get("CHECKOUT_CANCEL_URL", "https://lyrashaai.com/")}
+              "metadata[state]": "WY", "metadata[product]": PRODUCT, "locale": locale, "metadata[quantity]": "10", "metadata[prechecked]": "1",
+              "success_url": return_url("CHECKOUT_SUCCESS_URL", locale),
+              "cancel_url": return_url("CHECKOUT_CANCEL_URL", locale)}
     if email:
         params["customer_email"] = email
     return True, 200, {"eligible": True, "qualified": n, "price_cents": price_cents(), "business_type": niche, "stripe_params": params}
@@ -84,11 +99,22 @@ def checkout_session():
     key = os.environ.get("STRIPE_CHECKOUT_KEY", "")
     if not key:
         return jsonify({**body, "created": False, "note": "dry run: STRIPE_CHECKOUT_KEY not configured"}), 200
-    if "_test_" not in key:
-        return jsonify(error="live keys are refused by this build"), 403
+    live = key.startswith(("rk_live_", "sk_live_"))
+    test = key.startswith(("rk_test_", "sk_test_"))
+    if not (live or test):
+        return jsonify(error="invalid checkout key configuration"), 503
+    if live and os.environ.get("STRIPE_CHECKOUT_LIVE") != "1":
+        return jsonify(error="live checkout disabled"), 403
+    if os.environ.get("STRIPE_CHECKOUT_LIVE") == "1":
+        from launch_config import live_blockers
+        if live_blockers():
+            return jsonify(error="live checkout not ready"), 503
     import requests
-    r = requests.post("https://api.stripe.com/v1/checkout/sessions", data=body["stripe_params"],
-                      headers={"Authorization": f"Bearer {key}"}, timeout=20)
+    try:
+        r = requests.post("https://api.stripe.com/v1/checkout/sessions", data=body["stripe_params"],
+                          headers={"Authorization": f"Bearer {key}"}, timeout=20)
+    except requests.RequestException:
+        return jsonify(error="checkout temporarily unavailable"), 502
     if r.status_code != 200:
         return jsonify(error="stripe error", status=r.status_code), 502
     s = r.json()

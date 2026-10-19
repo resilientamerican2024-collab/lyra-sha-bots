@@ -11,6 +11,8 @@ import order_fulfillment as of
 
 bp = Blueprint("stripe_bridge", __name__)
 TOLERANCE = 300
+_run_locks = {}
+_run_guard = threading.Lock()
 OK_TYPES = ("checkout.session.completed", "checkout.session.async_payment_succeeded")
 
 
@@ -43,6 +45,8 @@ def auto_refund(oid, pi, livemode):
         if not key or not pi.startswith("pi_"):
             return False, "no refund key or payment intent"
         live_key = key.startswith(("rk_live_", "sk_live_"))
+        if live_key != bool(livemode):
+            return False, "refund key/event mode mismatch"
         if (live_key or livemode) and not _flag("STRIPE_AUTO_REFUND_LIVE"):
             return False, "live-mode refunds disabled"
         r = requests.post("https://api.stripe.com/v1/refunds", timeout=30, auth=(key, ""),
@@ -50,8 +54,10 @@ def auto_refund(oid, pi, livemode):
                           data={"payment_intent": pi, "reason": "requested_by_customer",
                                 "metadata[order_id]": oid, "metadata[cause]": "unfulfillable"})
         j = r.json()
-        if r.ok:
+        if r.ok and j.get("status") == "succeeded":
             return True, f"{j.get('id')} status={j.get('status')} amount={j.get('amount')}"
+        if r.ok:
+            return False, f"refund {j.get('id')} status={j.get('status')}; requires reconciliation"
         return False, f"stripe error {r.status_code}: {(j.get('error') or {}).get('message','')[:120]}"
     except Exception as e:
         return False, f"exception {type(e).__name__}"
@@ -59,6 +65,17 @@ def auto_refund(oid, pi, livemode):
 
 def _run(oid):
     """Fulfil with bounded retries; if not FULFILLED, flag refund due and alert the founder once."""
+    with _run_guard:
+        lock = _run_locks.setdefault(oid, threading.Lock())
+    with lock:
+        return _run_locked(oid)
+
+
+def _run_locked(oid):
+    with of.db() as c:
+        saved = c.execute("SELECT note FROM stripe_orders WHERE order_id=?", (oid,)).fetchone()
+    if saved and (saved[0] or "").startswith("AUTO-REFUNDED"):
+        return
     st = None
     for i in range(3):
         of.process_order(oid)
@@ -81,9 +98,12 @@ def _run(oid):
         if ok:
             with of.db() as c:
                 c.execute("UPDATE stripe_orders SET refund_due=0, note=? WHERE order_id=?", (f"AUTO-REFUNDED {det}", oid))
-        alert(f"{oid} NOT fulfilled ({st}) - " + ("AUTO-REFUNDED" if ok else "refund due"),
+        alerted = alert(f"{oid} NOT fulfilled ({st}) - " + ("AUTO-REFUNDED" if ok else "refund due"),
               f"Order {oid} could not be fulfilled.\nStatus: {st}\nReason: {err}\nPayment: {pi}  amount (cents): {row['amount'] if row else '?'}\n"
               f"Customer was NOT sent a partial list.\n" + (f"Full refund issued automatically: {det}" if ok else f"Auto-refund not performed ({det}).\nAction: refund this payment in the Stripe dashboard (Payments > the payment > Refund)."))
+        if not alerted:
+            of.event(oid, "ALERT_FAILED", "Founder alert not accepted; inspect refund_due and order events")
+            of.log.error("Founder alert failed for order %s; inspect refund_due", oid)
 
 
 def _flag(name):
@@ -137,7 +157,7 @@ def stripe_webhook():
         with of.db() as c:
             row = c.execute("SELECT order_id FROM stripe_orders WHERE payment_intent=?", (pi,)).fetchone()
             if row:
-                c.execute("UPDATE stripe_orders SET note=? WHERE order_id=?", (typ, row[0]))
+                c.execute("UPDATE stripe_orders SET note=CASE WHEN note LIKE 'AUTO-REFUNDED%' THEN note ELSE ? END WHERE order_id=?", (typ, row[0]))
         oid = row[0] if row else "unknown"
         if row:
             of.event(oid, "DISPUTE" if "dispute" in typ else "REFUNDED", eid)
@@ -148,8 +168,6 @@ def stripe_webhook():
         return jsonify(ignored=typ), 200
     if s.get("payment_status") != "paid":
         return jsonify(ignored="not paid"), 200
-    if _seen(eid):
-        return jsonify(duplicate=True, event=eid), 200
     m = s.get("metadata") or {}
     sid = str(s.get("id", ""))
     oid = "STRIPE-" + re.sub(r"[^A-Za-z0-9_-]", "", sid)[-40:]
@@ -166,7 +184,14 @@ def stripe_webhook():
     if paid < qty * min_c:
         of.event(oid, "UNDERPAID", f"paid={paid} need>={qty*min_c}")
         return jsonify(error="amount below price for quantity"), 400
-    to_customer = _flag("STRIPE_DELIVER_TO_CUSTOMER")
+    if ev.get("livemode"):
+        from checkout_gate import PRODUCT
+        if (m.get("product") != PRODUCT or qty != 10 or paid != 2900 or s.get("currency") != "usd"
+                or city.lower() != "cheyenne" or state.upper() not in ("WY", "WYOMING")
+                or not of.industry_ok(btype)):
+            # Retryable rejection retains Stripe's signed event for operator reconciliation.
+            return jsonify(error="paid session does not match approved offer"), 400
+    to_customer = bool(ev.get("livemode")) and _flag("STRIPE_DELIVER_TO_CUSTOMER")
     email = cust if to_customer else os.environ.get("FULFILLMENT_TEST_RECIPIENTS", "ingrid@lyrashaai.com").split(",")[0].strip().lower()
     _tbl()
     cap = int(os.environ.get("FULFILLMENT_MAX_LEADS", "25"))
@@ -179,13 +204,32 @@ def stripe_webhook():
         return jsonify(order_id=oid, status="REFUND_DUE", reason="over cap"), 200
     try:
         with of.db() as c:
+            c.execute("CREATE TABLE IF NOT EXISTS stripe_events(event_id TEXT PRIMARY KEY, at TEXT)")
             c.execute("INSERT INTO orders(order_id,customer_email,business_type,city,state,quantity,is_test,status,created_at,updated_at)"
                       " VALUES(?,?,?,?,?,?,?,?,?,?)", (oid, email, btype, city, state, qty, 0 if to_customer else 1, "RECEIVED", of.now(), of.now()))
-        with of.db() as c:
-            c.execute("INSERT OR IGNORE INTO stripe_orders(order_id,session_id,payment_intent,amount,livemode) VALUES(?,?,?,?,?)", (oid, sid, pi, paid, int(bool(ev.get("livemode")))))
+            c.execute("INSERT INTO stripe_orders(order_id,session_id,payment_intent,amount,livemode) VALUES(?,?,?,?,?)", (oid, sid, pi, paid, int(bool(ev.get("livemode")))))
+            c.execute("INSERT INTO stripe_events VALUES(?,?)", (eid, of.now()))
         of.event(oid, "RECEIVED", f"stripe event={eid} livemode={bool(ev.get('livemode'))} paid={paid} deliver_to_customer={to_customer}")
     except sqlite3.IntegrityError:
+        with of.db() as c:
+            saved = c.execute("SELECT 1 FROM orders o JOIN stripe_orders s ON o.order_id=s.order_id WHERE o.order_id=? AND s.session_id=?", (oid, sid)).fetchone()
+        if not saved:
+            return jsonify(error="order persistence failed; retry required"), 503
         of.event(oid, "DUPLICATE_SESSION_IGNORED", eid)
         return jsonify(order_id=oid, duplicate=True), 200
     threading.Thread(target=_run, args=(oid,), daemon=True).start()
     return jsonify(order_id=oid, status="RECEIVED", duplicate=False), 200
+
+
+def resume_unfinished():
+    """Recover paid orders through the same bounded fulfillment/refund coordinator."""
+    _tbl()
+    with of.db() as c:
+        ids = [r[0] for r in c.execute("""
+            SELECT o.order_id FROM orders o JOIN stripe_orders s ON s.order_id=o.order_id
+            WHERE o.status NOT IN ('FULFILLED','EMAIL_SENT')
+              AND COALESCE(s.note,'') NOT LIKE 'AUTO-REFUNDED%'
+        """)]
+    for oid in ids:
+        threading.Thread(target=_run, args=(oid,), daemon=True).start()
+    return ids
