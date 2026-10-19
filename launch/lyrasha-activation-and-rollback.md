@@ -61,6 +61,11 @@ health /health. Stage all settings with live flags OFF. After confirming live ke
 live webhook, delivery identity and the public Macaly route, apply all four live
 flags together. launch_config.validate_startup fails closed on partial activation.
 The patch fixes price at 2900 cents and permits locale en/es/es-419/auto.
+Macaly must keep LEADS_LOCALE_ENABLED absent/off until the approved backend revision
+is deployed, then enable it under the same final activation approval. Explicit
+locales add lang=en/es to success/cancel URLs. Keep the three TEST_MODE banners
+true until production activation is authorized; removing them is part of that
+exact approval, never a preview-side inference.
 
 Founder personally publishes Macaly. Verify public page and checkout; use only the
 specifically approved real-money test and recipient. Confirm signed paid event,
