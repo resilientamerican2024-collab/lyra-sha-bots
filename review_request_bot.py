@@ -14,6 +14,7 @@ Runs as a Flask web server on Railway.
 Twilio handles SMS in/out.
 """
 
+import hmac
 import json
 import logging
 import os
@@ -744,9 +745,11 @@ def onboard_submit():
 @app.route("/admin/leads", methods=["GET"])
 def admin_leads():
     """Read-only access to client_hub.db leads. Filterable by city / no-website / biz_type.
-    Key is a Railway env var ADMIN_LEADS_KEY (or falls back to lyra-clean-2026 if not set)."""
-    expected_key = os.environ.get("ADMIN_LEADS_KEY", "lyra-clean-2026")
-    if request.args.get("key") != expected_key:
+    Auth: Railway env var ADMIN_LEADS_KEY, sent in the X-Admin-Key header (never in the URL).
+    Fails closed: if the env var is not set, every request is rejected."""
+    expected_key = os.environ.get("ADMIN_LEADS_KEY", "")
+    supplied_key = request.headers.get("X-Admin-Key", "")
+    if not expected_key or not hmac.compare_digest(supplied_key.encode(), expected_key.encode()):
         return "forbidden", 403
 
     city = request.args.get("city", "").strip()
@@ -827,10 +830,9 @@ def admin_leads():
 
 @app.route("/admin/clear-tests", methods=["GET"])
 def clear_tests():
-    """One-off cleanup: remove test/demo onboarding rows. Guarded by a key."""
-    if request.args.get("key") != "lyra-clean-2026":
-        return "forbidden", 403
-    try:
+    """DISABLED (security): destructive one-off cleanup removed from the web. Always rejects."""
+    return "disabled", 403
+    try:  # unreachable; kept for history until a properly authenticated admin tool exists
         init_db()
         with sqlite3.connect(str(DB_PATH)) as conn:
             cur = conn.execute(
