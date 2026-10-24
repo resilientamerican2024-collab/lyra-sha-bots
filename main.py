@@ -220,11 +220,22 @@ def run_script(script_name, label):
     return "skipped" if skipped else "partial" if partial else "completed"
 
 
+def _flag_enabled(name):
+    """Opt-in switch: a bot runs only if the env var is explicitly true. Unset or false = OFF."""
+    return os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on")
+
+
 def run_comment_bot():
+    if not _flag_enabled("COMMENT_BOT_ENABLED"):
+        log.info("Comment Bot skipped: COMMENT_BOT_ENABLED is not true")
+        return "disabled"
     run_script("comment_bot.py", "Comment Bot")
 
 
 def run_review_bot():
+    if not _flag_enabled("REVIEW_BOT_ENABLED"):
+        log.info("Review Bot skipped: REVIEW_BOT_ENABLED is not true")
+        return "disabled"
     run_script("review_bot.py", "Review Bot")
 
 
