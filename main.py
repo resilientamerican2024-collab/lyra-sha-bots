@@ -232,6 +232,24 @@ def run_comment_bot():
     run_script("comment_bot.py", "Comment Bot")
 
 
+def run_community_bot():
+    # Founder-approved recovery deployment, private previews only; public replies OFF.
+    if not _flag_enabled("COMMUNITY_BOT_ENABLED"):
+        log.info("Community Bot skipped: COMMUNITY_BOT_ENABLED is not true")
+        return "disabled"
+    run_script("nv_community_preview_entrypoint.py", "Community Private Preview")
+
+
+def community_storage_preflight():
+    # Read-only host evidence. No credentials or customer comments enter this log.
+    import shutil
+    volume = Path(os.environ.get("RAILWAY_VOLUME_MOUNT_PATH", str(HERE)))
+    usage = shutil.disk_usage(volume)
+    digest = hashlib.sha256((HERE / "nv_community_engine.py").read_bytes()).hexdigest()
+    log.info("Community preflight: mode=PRIVATE_DRY_RUN_ONLY engine_sha256=%s volume_total=%d volume_free=%d",
+             digest, usage.total, usage.free)
+
+
 def run_review_bot():
     if not _flag_enabled("REVIEW_BOT_ENABLED"):
         log.info("Review Bot skipped: REVIEW_BOT_ENABLED is not true")
@@ -397,12 +415,17 @@ def main():
     write_config()
     auto_refresh_fb_tokens(trigger="startup")
     init_leads_db()
+    community_storage_preflight()
 
     scheduler = BlockingScheduler(timezone=MOUNTAIN)
 
     # Comment bot: every 30 min
     scheduler.add_job(run_comment_bot, CronTrigger(minute="0,30", timezone=MOUNTAIN),
                       id="comment_bot", name="Comment Bot")
+
+    # Existing host only; new community lane defaults disabled and can only preview.
+    scheduler.add_job(run_community_bot, CronTrigger(minute="0,30", timezone=MOUNTAIN),
+                      id="community_bot", name="Community Private Preview")
 
     # Review bot: every hour at :05
     scheduler.add_job(run_review_bot, CronTrigger(minute="5", timezone=MOUNTAIN),

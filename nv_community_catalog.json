@@ -1,0 +1,56 @@
+{
+  "checked_at": "2026-11-24T18:48:25.059653+00:00",
+  "status": "HISTORICAL_CATALOG_CURRENT_AVAILABILITY_UNVERIFIED",
+  "source_urls": [
+    "https://github.com/resilientamerican2024-collab/lsa-swarm-bridge/issues/23#issuecomment-6099441294",
+    "https://github.com/resilientamerican2024-collab/lsa-swarm-bridge/issues/23#issuecomment-6102503334"
+  ],
+  "current_verification": "All five Etsy URLs returned HTTP 403 CAPTCHA. No bypass attempted; current availability UNKNOWN, not unavailable.",
+  "products": [
+    {
+      "name": "Camiseta Boricua ¿A Qué Jugabas en el Recreo?",
+      "community": "Guayanilla",
+      "url": "https://www.etsy.com/listing/4592598592",
+      "historically_published": "2026-10-10",
+      "availability_status": "UNKNOWN",
+      "automated_mention_enabled": false,
+      "availability_verified": false
+    },
+    {
+      "name": "Orchard Beach Bronx Shirt",
+      "community": "Bronx",
+      "url": "https://www.etsy.com/listing/4592584541",
+      "historically_published": "2026-10-10",
+      "availability_status": "UNKNOWN",
+      "automated_mention_enabled": false,
+      "availability_verified": false
+    },
+    {
+      "name": "De Mi Barrio Pa’l Mundo Camiseta",
+      "community": "Barrio",
+      "url": "https://www.etsy.com/listing/4592584837",
+      "historically_published": "2026-10-10",
+      "availability_status": "UNKNOWN",
+      "automated_mention_enabled": false,
+      "availability_verified": false
+    },
+    {
+      "name": "Hydrant Summer",
+      "community": "Bronx",
+      "url": "https://www.etsy.com/listing/4592793616",
+      "historically_published": "2026-10-10",
+      "availability_status": "UNKNOWN",
+      "automated_mention_enabled": false,
+      "availability_verified": false
+    },
+    {
+      "name": "Which Block Raised You",
+      "community": "Bronx",
+      "url": "https://www.etsy.com/listing/4592794058",
+      "historically_published": "2026-10-10",
+      "availability_status": "UNKNOWN",
+      "automated_mention_enabled": false,
+      "availability_verified": false
+    }
+  ]
+}

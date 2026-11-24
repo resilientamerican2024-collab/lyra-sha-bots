@@ -1,0 +1,7 @@
+{
+  "accounts": {
+    "813874968486490": {"brand":"trending_edit","paused":true,"verified_names":["The Trending Edit","Trending Products"],"blocker":"Native OAuth invalid; primary brand identity mapping not live verified"},
+    "565654433307015": {"brand":"gtm","paused":true,"verified_names":["Geriatric Teen Mom Oh No"],"blocker":"Native OAuth invalid"},
+    "850416141495992": {"brand":"bible","paused":true,"verified_names":["Bible for Everyone"],"blocker":"Native OAuth invalid"}
+  }
+}
