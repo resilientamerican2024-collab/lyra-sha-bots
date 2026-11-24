@@ -72,7 +72,10 @@ def dispatch(db, account, comment, thread, author, text, brand, send, prior=Fals
     n = rotation[0] if rotation else 0
     if dry_run:
         n += db.execute('SELECT count(*) FROM dry_runs WHERE account=?',(account,)).fetchone()[0]
-    decision = respond(text, brand=brand, rotation=n, catalog=catalog)
+    # Exact single-word compliment alias; reuse the approved reaction library.
+    # Keep original text for safety checks and input provenance.
+    policy_text = 'Beautiful' if text.strip().casefold() in {'nice', 'nice!', 'nice.', 'nice!!'} else text
+    decision = respond(policy_text, brand=brand, rotation=n, catalog=catalog)
     try:
         import crisis_safety
         if crisis_safety.is_crisis(text, crisis_safety.build_crisis_keywords(crisis_safety.load_config()), None):
