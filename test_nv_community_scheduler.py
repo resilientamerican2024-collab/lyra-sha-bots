@@ -1,5 +1,5 @@
-import ast,unittest
-from unittest.mock import Mock
+import ast,unittest,os
+from unittest.mock import Mock, patch
 from pathlib import Path
 HERE=Path(__file__).resolve().parent
 RELEASE=HERE if (HERE/'main.py').exists() else HERE/'nv_railway_release'
@@ -10,6 +10,16 @@ class SchedulerTests(unittest.TestCase):
   ns=self.function();self.assertEqual(ns['run_community_bot'](),'disabled');ns['run_script'].assert_not_called()
  def test_enabled_only_private_entrypoint(self):
   ns=self.function();ns['_flag_enabled'].return_value=True;ns['run_community_bot']();ns['run_script'].assert_called_once_with('nv_community_preview_entrypoint.py','Community Private Preview')
- def test_wrapper_always_requests_preview(self):
-  source=(RELEASE/'nv_community_preview_entrypoint.py').read_text();self.assertIn("'--preview'",source);self.assertNotIn('public_replies_approved',source)
+ def test_wrapper_defaults_to_private_preview(self):
+  from nv_community_preview_entrypoint import main
+  with patch.dict(os.environ,{},clear=True), patch('nv_community_preview_entrypoint.subprocess.run') as run:
+   run.return_value.returncode=0
+   self.assertEqual(main(),0)
+   self.assertIn('--preview',run.call_args.args[0])
+ def test_nonexact_approval_stays_private(self):
+  from nv_community_preview_entrypoint import main
+  with patch.dict(os.environ,{'COMMUNITY_PUBLIC_REPLIES_APPROVED':'yes'},clear=True), patch('nv_community_preview_entrypoint.subprocess.run') as run:
+   run.return_value.returncode=0
+   self.assertEqual(main(),0)
+   self.assertIn('--preview',run.call_args.args[0])
 if __name__=='__main__':unittest.main()
